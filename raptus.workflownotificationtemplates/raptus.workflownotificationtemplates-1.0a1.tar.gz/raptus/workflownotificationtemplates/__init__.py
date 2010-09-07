@@ -1,0 +1,6 @@
+from zope.i18nmessageid import MessageFactory
+workflownotificationtemplatesMessageFactory = MessageFactory('raptus.workflownotificationtemplates')
+from Products.PlacelessTranslationService.utility import PTSTranslationDomain
+workflownotificationtemplatesdomain = PTSTranslationDomain('raptus.workflownotificationtemplates')
+
+STORAGE_KEY = 'raptus.workflownotificationtemplates'
