@@ -1,0 +1,1 @@
+from jqtouch import settings
