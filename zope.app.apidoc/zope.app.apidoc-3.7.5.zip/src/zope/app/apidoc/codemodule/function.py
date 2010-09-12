@@ -1,0 +1,53 @@
+##############################################################################
+#
+# Copyright (c) 2004 Zope Foundation and Contributors.
+# All Rights Reserved.
+#
+# This software is subject to the provisions of the Zope Public License,
+# Version 2.1 (ZPL).  A copy of the ZPL should accompany this distribution.
+# THIS SOFTWARE IS PROVIDED "AS IS" AND ANY AND ALL EXPRESS OR IMPLIED
+# WARRANTIES ARE DISCLAIMED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF TITLE, MERCHANTABILITY, AGAINST INFRINGEMENT, AND FITNESS
+# FOR A PARTICULAR PURPOSE.
+#
+##############################################################################
+"""Function representation for code browser 
+
+$Id: function.py 113308 2010-06-10 01:09:36Z srichter $
+"""
+__docformat__ = 'restructuredtext'
+
+from zope.interface import implements
+from zope.location.interfaces import ILocation
+
+from zope.app.apidoc.utilities import getFunctionSignature
+from interfaces import IFunctionDocumentation
+
+class Function(object):
+    """This class represents a function declared in the module."""
+    implements(ILocation, IFunctionDocumentation)
+
+    def __init__(self, module, name, func, doc=None):
+        self.__parent__ = module
+        self.__name__ = name
+        self.__func = func
+        if doc is None:
+            self.__doc__ = func.__doc__
+        else:
+            self.__doc__ = doc
+
+    def getPath(self):
+        """See IFunctionDocumentation."""
+        return self.__parent__.getPath() + '.' + self.__name__
+
+    def getDocString(self):
+        """See IFunctionDocumentation."""
+        return self.__doc__
+
+    def getSignature(self):
+        """See IFunctionDocumentation."""
+        return getFunctionSignature(self.__func)
+
+    def getAttributes(self):
+        """See IClassDocumentation."""
+        return self.__func.__dict__.items()
