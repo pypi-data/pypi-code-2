@@ -1,0 +1,119 @@
+'''apycot reports'''
+
+import re
+
+from cubicweb.view import NOINDEX, NOFOLLOW
+from cubicweb.web import uicfg, formwidgets as wdgs
+from cubicweb.web.views import urlpublishing
+from cubicweb.web.views.urlrewrite import rgx, build_rset, SchemaBasedRewriter, \
+                                          SimpleReqRewriter
+
+from cubes.narval.proxy import bot_proxy
+
+def anchor_name(data):
+    """escapes XML/HTML forbidden characters in attributes and PCDATA"""
+    return (data.replace('&', '').replace('<', '').replace('>','')
+            .replace('"', '').replace("'", ''))
+
+_afs = uicfg.autoform_section
+_affk = uicfg.autoform_field_kwargs
+
+# ui configuration #############################################################
+
+
+# register generated message id
+_('Available checkers:')
+_('Available options:')
+
+def build_help_func(attr, apycot_type, etype='TestConfig'):
+    def help_func(form, attr=attr, apycot_type=apycot_type, etype=etype):
+        req = form._cw
+        help = req.vreg.schema.eschema(etype).rdef(attr).description
+        help = '<div>%s.</div>' % req._(help)
+        try:
+            # ProtocolError may be called during method() call
+            bot = bot_proxy(req.vreg.config, req.data)
+            method = getattr(bot, 'available_%s' % apycot_type)
+            available = ', '.join(defdict.get('id', defdict.get('name'))
+                                  for defdict in method())
+        except Exception, ex:
+            form.warning('cant contact apycot bot: %s', ex)
+            return help
+        help += '<div>%s %s (<a href="%s">%s</a>)</div>' % (
+            req.__('Available %s:' % apycot_type), available,
+            req.build_url('apycotdoc#%s' % apycot_type),
+            req._('more information')
+            )
+        return help
+    return help_func
+
+for etype in ('TestConfig', 'ProjectEnvironment'):
+    _afs.tag_subject_of((etype, 'refinement_of', '*'), 'main', 'attributes')
+    helpfunc = build_help_func('check_config', 'options', etype=etype)
+    _affk.tag_attribute((etype, 'check_config'), {'help': helpfunc})
+
+
+_affk.tag_attribute(('ProjectEnvironment', 'vcs_path'),
+                    {'widget': wdgs.TextInput})
+
+_affk.tag_attribute(('TestConfig', 'start_mode'), {'sort': False})
+_affk.tag_attribute(('TestConfig', 'start_rev_deps'),
+                    {'allow_none': True,
+                     'choices': [(_('inherited'), ''), ('yes', '1'), ('no', '0')]})
+_affk.tag_attribute(('TestConfig', 'subpath'),
+                    {'widget': wdgs.TextInput})
+_afs.tag_attribute(('TestConfig', 'computed_start_mode'), 'main', 'hidden')
+
+_afs.tag_subject_of(('TestConfig', 'use_recipe', '*'), 'main', 'attributes')
+
+
+_abba = uicfg.actionbox_appearsin_addmenu
+_abba.tag_subject_of(('*', 'has_apycot_environment', '*'), True)
+_abba.tag_subject_of(('*', 'local_repository', '*'), True)
+_abba.tag_object_of(('*', 'for_check', '*'), False)
+_abba.tag_object_of(('*', 'during_execution', '*'), False)
+_abba.tag_object_of(('*', 'using_config', '*'), False)
+_abba.tag_object_of(('*', 'using_environment', '*'), False)
+_abba.tag_object_of(('*', 'on_environment', '*'), False)
+
+
+# urls configuration ###########################################################
+
+class SimpleReqRewriter(SimpleReqRewriter):
+    rules = [
+        (rgx('/apycotdoc'), dict(vid='apycotdoc')),
+        ]
+
+# def list_test_executions(inputurl, uri, req, schema):
+#     rql = req.vreg['etypes'].etype_class('TestExecution').fetch_rql(req.user)
+#     rset = req.execute(rql)
+#     if len(rset) > 1:
+#         req.form['vid'] = 'apycot.te.summarytable'
+#     return None, rset
+
+class RestPathRewriter(SchemaBasedRewriter):
+    rules = [
+        (rgx('/projectenvironment/([^/]+)/([^/]+)'),
+         build_rset(rql='TestConfig X WHERE X use_environment P, P name %(pe)s, '
+                        'X name %(tc)s',
+                    rgxgroups=[('pe', 1), ('tc', 2)])),
+        (rgx('/projectenvironment/([^/]+)/([^/]+)/([^/]+)'),
+         build_rset(rql='TestExecution Y WHERE X use_environment P, P name %(pe)s,'
+                        ' X name %(tc)s, Y using_config X, Y eid %(te)s',
+                    rgxgroups=[('pe', 1), ('tc', 2), ('te', 3)])),
+
+        # (rgx('/testexecution/?', re.I), list_test_executions),
+        ]
+
+# XXX necessary since it takes precedence other the /testexecution/' rule above
+class RestPathEvaluator(urlpublishing.RestPathEvaluator):
+
+    def cls_rset(self, req, cls):
+        rset = super(RestPathEvaluator, self).cls_rset(req, cls)
+        if cls.__regid__ == 'TestExecution' and len(rset) > 1:
+            req.form['vid'] = 'apycot.te.summarytable'
+        return rset
+
+def registration_callback(vreg):
+    vreg.register_all(globals().values(), __name__, (RestPathEvaluator,))
+    vreg.register_and_replace(RestPathEvaluator, urlpublishing.RestPathEvaluator)
