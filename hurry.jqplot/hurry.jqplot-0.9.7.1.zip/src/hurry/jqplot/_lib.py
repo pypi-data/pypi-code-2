@@ -1,0 +1,23 @@
+from hurry.resource import Library, ResourceInclusion
+
+jqplot = Library('jqplot')
+
+css = ResourceInclusion(jqplot, 'jquery.jqplot.css', minified='jquery.jqplot.min.css')
+base = ResourceInclusion(jqplot, 'jquery.jqplot.js', minified='jquery.jqplot.min.js')
+barRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.barRenderer.js', depends=[base], minified='plugins/jqplot.barRenderer.min.js')
+excanvas = ResourceInclusion(jqplot, 'excanvas.js', minified='excanvas.min.js')
+highlighter = ResourceInclusion(jqplot, 'plugins/jqplot.highlighter.js', depends=[base], minified='plugins/jqplot.highlighter.min.js')
+logAxisRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.logAxisRenderer.js', depends=[base], minified='plugins/jqplot.logAxisRenderer.min.js')
+categoryAxisRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.categoryAxisRenderer.js', depends=[base], minified='plugins/jqplot.categoryAxisRenderer.min.js')
+ohlcRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.ohlcRenderer.js', depends=[base], minified='plugins/jqplot.ohlcRenderer.min.js')
+canvasTextRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.canvasTextRenderer.js', depends=[base], minified='plugins/jqplot.canvasTextRenderer.min.js')
+canvasAxisLabelRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.canvasAxisLabelRenderer.js', depends=[base, canvasTextRenderer], minified='plugins/jqplot.canvasAxisLabelRenderer.min.js')
+cursor = ResourceInclusion(jqplot, 'plugins/jqplot.cursor.js', depends=[base], minified='plugins/jqplot.cursor.min.js')
+pointLabels = ResourceInclusion(jqplot, 'plugins/jqplot.pointLabels.js', depends=[base], minified='plugins/jqplot.pointLabels.min.js')
+trendline = ResourceInclusion(jqplot, 'plugins/jqplot.trendline.js', depends=[base], minified='plugins/jqplot.trendline.min.js')
+pieRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.pieRenderer.js', depends=[base], minified='plugins/jqplot.pieRenderer.min.js')
+dateAxisRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.dateAxisRenderer.js', depends=[base], minified='plugins/jqplot.dateAxisRenderer.min.js')
+mekkoRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.mekkoRenderer.js', depends=[base], minified='plugins/jqplot.mekkoRenderer.min.js')
+mekkoAxisRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.mekkoAxisRenderer.js', depends=[base], minified='plugins/jqplot.mekkoAxisRenderer.min.js')
+dragable = ResourceInclusion(jqplot, 'plugins/jqplot.dragable.js', depends=[base], minified='plugins/jqplot.dragable.min.js')
+canvasAxisTickRenderer = ResourceInclusion(jqplot, 'plugins/jqplot.canvasAxisTickRenderer.js', depends=[base, canvasTextRenderer], minified='plugins/jqplot.canvasAxisTickRenderer.min.js')
