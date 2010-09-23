@@ -1,0 +1,3 @@
+PROJECTNAME='unimr.memcachedlock'
+
+
