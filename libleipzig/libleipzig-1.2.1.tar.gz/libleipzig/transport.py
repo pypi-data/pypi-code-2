@@ -1,0 +1,88 @@
+# Copyright (C) 2009, 2010 Robert Lehmann
+
+import functools
+import inspect
+import operator
+import suds
+
+BASEURL = 'http://pcai055.informatik.uni-leipzig.de:8100/axis/services/%s?wsdl'
+services = {}
+
+def service(*results):
+    def wrapper(f):
+        name = f.__name__
+        args, _, _, _ = inspect.getargspec(f)
+
+        # Exposing `client.options.cache.clear` is not sensible since suds
+        # caches only for inter-session performance. Clearing it has no
+        # runtime impact on the library as the *real* cache is the client
+        # object keeping parsed WSDL definitions.
+
+        auth = suds.transport.http.HttpAuthenticated(
+               username='anonymous', password='anonymous')
+
+        class Result(tuple): # poor man's namedtuple
+            def __repr__(self):
+                return "(%s)" % ", ".join(
+                        "%s: %s" % d for d in zip(results, map(repr, self)))
+        for n, typ in enumerate(results):
+            setattr(Result, typ, property(operator.itemgetter(n)))
+        Result.__name__ = "%sResult" % name
+
+        def get_client(func, name, cred=None):
+            if cred:
+                return suds.client.Client(BASEURL % name,
+                    transport=suds.transport.http.HttpAuthenticated(
+                        username=cred[0], password=cred[1]))
+            if not hasattr(func, '_client'):
+                func._client = client = suds.client.Client(BASEURL % name,
+                        transport=auth)
+                client.options.cache.setduration(days=0)
+            return func._client
+
+        @functools.wraps(f)
+        def func(*vectors, **options):
+            # this prefetches the WSDL on library load!
+            client = get_client(func, name, options.pop('auth', None))
+
+            if len(args) != len(vectors):
+                raise TypeError(
+                    "service `%s' got %d arguments, expects %d (%s)" %
+                    (name, len(vectors), len(args), ", ".join(args)))
+
+            # assemble query to the SOAP service
+            request = client.factory.create('RequestParameter')
+            request.corpus = options.pop('corpus', 'de')
+
+            if options:
+                raise TypeError("%s() got an unexpected option '%s'" %
+                    (name, iter(options).next()))
+
+            for key, value in zip(args, vectors):
+                vector = client.factory.create('ns0:DataVector')
+                vector.dataRow = [key, value]
+
+                request.parameters.dataVectors.append(vector)
+
+            # fire query and construct result tuples
+            response = client.service.execute(request)
+            if not response.result:
+                return []
+            # do not use yield to trigger function body immediately
+            return [Result(map(unicode, e.dataRow))
+                    for e in response.result.dataVectors]
+
+        func._doc = func.__doc__ or ''
+        func._args = args
+        func._returns = results
+        func.__doc__ = "%s(%s) -> %s\n" % (name, ", ".join(args),
+            ", ".join(results)) + func._doc
+        func.prefetch = lambda: get_client(func, name)
+        func.set_credentials = lambda username, password: (
+                get_client(func, name).set_options(
+                    transport=suds.transport.http.HttpAuthenticated(
+                        username=username, password=password)))
+        services[name] = func
+
+        return func
+    return wrapper
