@@ -1,0 +1,1 @@
+from bigpackage import foo
