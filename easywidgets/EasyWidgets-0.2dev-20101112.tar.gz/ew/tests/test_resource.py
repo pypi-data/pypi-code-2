@@ -1,0 +1,159 @@
+import os.path
+from unittest import TestCase
+
+from webob import Request, Response
+from webtest import TestApp
+
+from ew import widget_context, Snippet, WidgetMiddleware, Widget
+from ew import ResourceManager
+
+import ew.kajiki_ew
+import ew.jinja2_ew
+
+TEMPLATE = Snippet('''<html>
+<head>
+<py:for each="x in resource_manager.emit('head_css')">$x</py:for>
+<py:for each="x in resource_manager.emit('head_js')">$x</py:for>
+</head>
+<body>
+<py:for each="x in resource_manager.emit('body_top_js')">$x</py:for>
+${widget.display()}
+<py:for each="x in resource_manager.emit('body_js')">$x</py:for>
+<py:for each="x in resource_manager.emit('body_js_tail')">$x</py:for>
+</body>
+</html>''', 'kajiki-html4')
+
+class _TestResourceInclusion(TestCase):
+
+    def setUp(self):
+        self.w = Widget(
+            template=Snippet('<h1>My Widget</h1>'),
+            resources=lambda:[
+                self.ew.CSSScript('/* head_css */'),
+                self.ew.JSScript('/* head_js */', 'head_js'),
+                self.ew.JSScript('/* body_top_js */', 'body_top_js'),
+                self.ew.JSScript('/* body_js */', 'body_js'),
+                self.ew.JSScript('/* body_tail */', 'body_js_tail')
+                ])
+        self.app = TestApp(_WidgetTest(self.w))
+
+    def test_render(self):
+        res = self.app.get('/')
+        parts = [
+            '''<!-- ew:head_css -->
+<style>/* head_css */</style>
+<!-- /ew:head_css -->''',
+            '''<!-- ew:head_js -->
+<script type="text/javascript">/* head_js */</script>
+<!-- /ew:head_js -->''',
+            '''<!-- ew:body_top_js -->
+<script type="text/javascript">/* body_top_js */</script>
+<!-- /ew:body_top_js -->''',
+            '''<h1>My Widget</h1>''',
+            '''<!-- ew:body_js -->
+<script type="text/javascript">/* body_js */</script>
+<!-- /ew:body_js -->''',
+            '''<!-- ew:body_js_tail -->
+<script type="text/javascript">/* body_tail */</script>
+<!-- /ew:body_js_tail -->''' ]
+        for part in parts:
+            assert part in res, '%s not in %s' % (part, res)
+
+class _TestScripts(TestCase):
+
+    def setUp(self):
+        self.resources = [
+                self.ew.JSLink('a/foo.js'),
+                self.ew.JSLink('a/bar.js'),
+                self.ew.CSSLink('a/foo.css'),
+                self.ew.CSSLink('a/bar.css')]
+        self.w = Widget(
+            template=Snippet('<h1>My Widget</h1>'),
+            resources=lambda:self.resources)
+        ResourceManager.paths = []
+        self.wtest = _WidgetTest(self.w)
+        self.app = TestApp(self.wtest)
+
+    def test_render(self):
+        app = TestApp(_WidgetTest(self.w))
+        res = app.get('/')
+        assert 'href="/_ew_resources/a/foo.css"' in res, res
+        assert 'href="/_ew_resources/a/bar.css"' in res, res
+        assert 'src="/_ew_resources/a/foo.js"' in res, res
+        assert 'src="/_ew_resources/a/bar.js"' in res, res
+
+    def test_serve(self):
+        app = TestApp(_WidgetTest(self.w))
+        app.get('/some/arbitrary/url')
+        app.get('/_ew_resources/a/foo.css', status=404)
+        ResourceManager.register_directory(
+            'a',
+            os.path.join(os.path.dirname(__file__), 'data'))
+        res = app.get('/_ew_resources/a/test.css')
+        assert '/* Test CSS file */'  in res, res
+        assert str(res).count('/* Test CSS file */') == 1, res
+
+    def test_render_compressed(self):
+        app = TestApp(_WidgetTest(self.w, compress=True))
+        res = app.get('/')
+        assert ('href="/_ew_resources/_slim/css?href='
+            'a%2Ffoo.css%3Ba%2Fbar.css"') in  res, res
+        assert ('src="/_ew_resources/_slim/js?href='
+            'a%2Ffoo.js%3Ba%2Fbar.js"') in res, res
+
+    def test_serve_compressed(self):
+        ResourceManager.resource_cache = {}
+        app = TestApp(_WidgetTest(self.w, use_jsmin=False))
+        app.get('/some/arbitrary/url')
+        app.get('/_ew_resources/a/foo.css', status=404)
+        ResourceManager.register_directory(
+            'a',
+            os.path.join(os.path.dirname(__file__), 'data'))
+        res = app.get('/_ew_resources/_slim/css?href=a%2Ftest.css%3Ba%2Ftest.css')
+        assert str(res).count('/* Test CSS file */') == 2, res
+        old_sz = len(str(app.get('/_ew_resources/_slim/js?href=a%2Ftest.js')))
+        app = TestApp(_WidgetTest(self.w, use_jsmin=True, use_cssmin=True))
+        ResourceManager.resource_cache = {}
+        res = app.get('/_ew_resources/_slim/js?href=a%2Ftest.js')
+        assert len(str(res)) < old_sz, res
+        res = app.get('/_ew_resources/_slim/css?href=a%2Ftest.css')
+        assert not res.body
+
+    def test_reregister(self):
+        ResourceManager.register_directory('a', 'foo')
+        ResourceManager.register_directory('a', 'foo')
+        self.assertRaises(AssertionError, ResourceManager.register_directory, 'a', 'bar')
+
+    def test_incompressible(self):
+        self.resources.append(self.ew.JSLink('a/baz.js', compress=False))
+        app = TestApp(_WidgetTest(self.w, compress=True))
+        res = app.get('/')
+        assert ('src="/_ew_resources/_slim/js?href='
+                'a%2Ffoo.js%3Ba%2Fbar.js"') in res, res
+        assert 'src="/_ew_resources/a/baz.js"' in res, res
+            
+class TestResourceInclusionKajiki(_TestResourceInclusion): ew=ew.kajiki_ew
+class TestScriptsKajiki(_TestScripts): ew=ew.kajiki_ew
+        
+class TestResourceInclusionJinja2(_TestResourceInclusion): ew=ew.jinja2_ew
+class TestScriptsJinja2(_TestScripts): ew=ew.jinja2_ew
+        
+class _WidgetTest(object):
+
+    def __init__(self, widget, **kwargs):
+        self.widget = widget
+        kw = dict(register_resources=False)
+        kw.update(kwargs)
+        self.app = WidgetMiddleware(self._core_app, **kw)
+
+    def __call__(self, environ, start_response):
+        return self.app(environ, start_response)
+
+    def _core_app(self, environ, start_response):
+        res = Response()
+        widget_context.resource_manager.register(self.widget)
+        res.unicode_body = TEMPLATE(dict(
+                widget=self.widget,
+                resource_manager=widget_context.resource_manager))
+        return res(environ, start_response)
+
