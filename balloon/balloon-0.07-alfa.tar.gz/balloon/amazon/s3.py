@@ -1,0 +1,583 @@
+
+#--------------------------------------------------------------------------------------
+## Copyright 2010 Alexey Petrov
+##
+## Licensed under the Apache License, Version 2.0 (the "License");
+## you may not use this file except in compliance with the License.
+## You may obtain a copy of the License at
+##
+##     http://www.apache.org/licenses/LICENSE-2.0
+##
+## Unless required by applicable law or agreed to in writing, software
+## distributed under the License is distributed on an "AS IS" BASIS,
+## WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+## See the License for the specific language governing permissions and
+## limitations under the License.
+##
+## See http://sourceforge.net/apps/mediawiki/balloon-foam
+##
+## Author : Alexey Petrov
+##
+
+
+#--------------------------------------------------------------------------------------
+from balloon.common import print_e, print_d, WorkerPool
+
+import os, os.path, hashlib
+
+
+#--------------------------------------------------------------------------------------
+class TRootObject :
+    "Represents S3 dedicated implementation of study root"
+
+    def __init__( self, the_s3_conn, the_bucket, the_id ) :
+        "Use static corresponding functions to an instance of this class"
+        self._connection = the_s3_conn
+
+        self._bucket = the_bucket
+        self._id = the_id
+
+        pass
+    
+    def __str__( self ) :
+
+        return "'%s'- %s" % ( self._id, self._bucket )
+
+    @staticmethod
+    def get( AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY ) :
+        "Looking for study root"
+        import boto
+        a_s3_conn = boto.connect_s3( AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY )
+        an_id = a_s3_conn.get_canonical_user_id()
+
+        import hashlib
+        a_bucket_name = hashlib.md5( an_id ).hexdigest()
+
+        a_bucket = None
+        try :
+            a_bucket = a_s3_conn.get_bucket( a_bucket_name )
+        except :
+            a_bucket = a_s3_conn.create_bucket( a_bucket_name )
+            pass
+        
+        return TRootObject( a_s3_conn, a_bucket, an_id )
+    
+    def _next( self ) :
+        for a_study_key in self._bucket.list() :
+            try :
+                yield TStudyObject.get( self, get_key_name( a_study_key ) )
+            except :
+                print_d( "study '%s' has no corresponding bucket\n" % get_key_name( a_study_key ) )
+                pass
+            
+            pass
+        
+        pass
+
+    def __iter__( self ) :
+        "Iterates through study files"
+        
+        return self._next()
+
+    pass
+
+
+#--------------------------------------------------------------------------------------
+def api_version() :
+
+    return '0.4'
+
+
+#--------------------------------------------------------------------------------------
+def _id_separator( the_api_version ) :
+    if the_api_version == 'dummy' :
+        return '|'
+
+    return ' | '
+
+
+#--------------------------------------------------------------------------------------
+def generate_id( the_parent_id, the_child_name, the_api_version ) :
+    a_separator = _id_separator( the_api_version )
+    a_child_id = '%s%s%s' % ( the_parent_id, a_separator, the_child_name )
+
+    a_bucket_name = hashlib.md5( a_child_id ).hexdigest()
+
+    return a_child_id, a_bucket_name
+
+
+#--------------------------------------------------------------------------------------
+def _decorate_key_name( the_name ) :
+    # This workaround make possible to use '/' symbol at the beginning of the key name
+
+    return '# %s' % the_name
+
+
+#--------------------------------------------------------------------------------------
+def get_key_name( the_key ) :
+
+    return the_key.name[ 2 : ]
+
+
+#--------------------------------------------------------------------------------------
+def get_key( the_parent_bucket, the_name ) :
+    a_decorated_name = _decorate_key_name( the_name )
+
+    from boto.s3.key import Key
+
+    return Key( the_parent_bucket, a_decorated_name )
+
+
+#--------------------------------------------------------------------------------------
+class TSealingObject :
+    """"Provides generic sealing functionality"""
+    def __init__( self, the_bucket ) :
+        "Use static corresponding functions to an instance of this class"
+        self._bucket = the_bucket
+        pass
+
+    def _seal_name( self ) :
+        "Ontains an unique seal name for each study object"
+        if self._bucket == None : # in case of broken entity
+            return None
+
+        return self._bucket.name
+
+    def _seal_key( self ) :
+        "Generates an unique seal key for each study object"
+        return get_key( self._bucket, self._seal_name() )
+
+    def seal( self ) :
+        "To mark the everything was sucessfuly uploaded"
+        self._seal_key().set_contents_from_string( 'x' )
+        pass
+
+    def sealed( self ) :
+        try:
+            self._seal_key().get_contents_as_string()
+            return True
+        except:
+            pass
+
+        return False
+
+    class TIterator :
+        def __init__( self, the_bucket, the_seal_name ) :
+            self._bucket = the_bucket
+            self._seal_name = the_seal_name
+            pass
+
+        def __iter__( self ) :
+            if self._bucket == None : # in case of broken entity
+                return 
+
+            for an_entity_key in self._bucket.list() :
+                if get_key_name( an_entity_key ) == self._seal_name :
+                    continue
+
+                yield an_entity_key
+                pass
+        
+            pass
+
+        pass
+
+    def iterator( self ) :
+        return self.TIterator( self._bucket, self._seal_name() )
+
+    def delete( self ) :
+        if self._bucket == None :
+            return
+
+        self._seal_key().delete()
+        pass
+
+    pass
+
+
+#--------------------------------------------------------------------------------------
+class TStudyObject( TSealingObject ) :
+    "Represents S3 dedicated implementation of study object"
+
+    def __init__( self, the_root_object, the_key, the_bucket, the_id, the_api_version ) :
+        "Use static corresponding functions to an instance of this class"
+        TSealingObject.__init__( self, the_bucket )
+
+        self._root_object = the_root_object
+
+        self._key = the_key
+        self._bucket = the_bucket
+        self._id = the_id
+
+        self._api_version = the_api_version
+        pass
+    
+    def root( self ) :
+
+        return self._root_object
+
+    def name( self ) :
+
+        return get_key_name( self._key )
+
+    def connection( self ) :
+
+        return self._root_object._connection
+
+    def __str__( self ) :
+
+        return "'%s' - '%s' - %s" % ( self._id, self._api_version, self._bucket )
+
+    @staticmethod
+    def create( the_root_object, the_study_name ) :
+        a_key = get_key( the_root_object._bucket, the_study_name )
+
+        an_api_version = api_version()
+
+        a_key.set_contents_from_string( an_api_version )
+
+        an_id, a_bucket_name = generate_id( the_root_object._id, the_study_name, an_api_version )
+    
+        a_bucket = the_root_object._connection.create_bucket( a_bucket_name )
+
+        return TStudyObject( the_root_object, a_key, a_bucket, an_id, an_api_version )
+
+    @staticmethod
+    def get( the_root_object, the_study_name ) :
+        a_key = get_key( the_root_object._bucket, the_study_name )
+        
+        an_api_version = None
+        try:
+            an_api_version = a_key.get_contents_as_string()
+        except:
+            from balloon.common import print_traceback
+            print_traceback()
+
+            raise NameError( "There is no '%s' study\n" % the_study_name )
+            pass
+
+        an_id = a_bucket_name = a_bucket = None
+        try: # in case of broken entities
+            an_id, a_bucket_name = generate_id( the_root_object._id, the_study_name, an_api_version )
+    
+            a_bucket = the_root_object._connection.get_bucket( a_bucket_name )
+        except :
+            import sys, traceback
+            traceback.print_exc( file = sys.stderr )
+            pass
+    
+        return TStudyObject( the_root_object, a_key, a_bucket, an_id, an_api_version )
+
+    def __iter__( self ) :
+        "Iterates through study files"
+        for a_file_key in self.iterator() :
+            try:
+                yield TFileObject.get( self, get_key_name( a_file_key ) )
+            except:
+                from balloon.common import print_traceback
+                print_traceback()
+            pass
+
+            pass
+        
+        pass
+
+    def delete( self, the_number_threads, the_printing_depth ) :
+        print_d( "deleteting - %s\n" % self, the_printing_depth )
+
+        a_worker_pool = WorkerPool( the_number_threads )
+
+        a_deleter = lambda the_object, the_number_threads, the_printing_depth : \
+            the_object.delete( the_number_threads, the_printing_depth )
+
+        for a_file_object in self :
+            a_worker_pool.charge( a_deleter, ( a_file_object, the_number_threads, the_printing_depth + 1 ) )
+            pass
+        
+        TSealingObject.delete( self )
+        
+        a_worker_pool.shutdown()
+        a_worker_pool.join()
+
+        if self._bucket != None : # in case of broken entity
+            self._bucket.delete()
+            pass
+
+        self._key.delete()
+        pass
+
+    pass
+
+
+#--------------------------------------------------------------------------------------
+def _file_key_separator( the_api_version ) :
+    if the_api_version < '0.3' : 
+        raise NotImplementedError( "Not supported for API vesion low than 0.3" )
+
+    return ' :: '
+
+
+#--------------------------------------------------------------------------------------
+def _read_file_props( the_key, the_api_version ):
+    a_hex_md5, a_file_path = None, None
+    a_contents = the_key.get_contents_as_string()
+
+    if the_api_version >= "0.3" and the_api_version != 'dummy':
+        a_separator = _file_key_separator( the_api_version )
+        a_hex_md5, a_file_path = a_contents.split( a_separator )
+    else:
+        a_file_path = get_key_name( the_key )
+        a_hex_md5 = a_contents
+        pass
+
+    return a_hex_md5, a_file_path
+
+
+#--------------------------------------------------------------------------------------
+def generate_uploading_dir( the_file_path ) :
+    # import os.path; a_file_dirname = os.path.dirname( the_file_path )
+    import tempfile; a_file_dirname = tempfile.gettempdir()
+
+    import os.path; a_file_basename = os.path.basename( the_file_path )
+
+    a_sub_folder = hashlib.md5( a_file_basename ).hexdigest()
+    a_working_dir = os.path.join( a_file_dirname, a_sub_folder )
+    
+    return a_working_dir
+
+
+#--------------------------------------------------------------------------------------
+class TFileObject( TSealingObject ) :
+    "Represents S3 dedicated implementation of file object"
+
+    def __init__( self, the_study_object, the_key, the_bucket, the_id, the_hex_md5, the_file_path ) :
+        "Use static corresponding functions to an instance of this class"
+        TSealingObject.__init__( self, the_bucket )
+
+        self._study_object = the_study_object
+
+        self._key = the_key
+        self._bucket = the_bucket
+        self._id = the_id
+
+        self._hex_md5 = the_hex_md5
+        self._file_path = the_file_path
+
+        pass
+    
+    def file_path( self ) :
+        return self._file_path
+
+    def hex_md5( self ):
+        return self._hex_md5
+
+    def located_file( self ): 
+        if self.api_version() < '0.3' or self.api_version() == 'dummy':
+
+           return get_key_name( self._key )[ 1 : ]
+        
+        return get_key_name( self._key )
+        
+    def key( self ):
+        return get_key_name( self._key )
+    
+    def connection( self ) :
+        return self._study_object._connection
+
+    def api_version( self ) :
+        return self._study_object._api_version
+
+    def __str__( self ) :
+        return "'%s' - '%s' - %s" % ( self._id, self._hex_md5, self._bucket )
+
+    @staticmethod
+    def create( the_study_object, the_file_path, the_file_location, the_hex_md5 ) :
+        a_file_name = os.path.basename( the_file_path )
+        
+        a_located_file = os.path.join( the_file_location, a_file_name )
+
+        a_key = get_key( the_study_object._bucket, a_located_file )
+        
+        an_api_version = the_study_object._api_version
+
+        a_separator = _file_key_separator( an_api_version )
+        
+        a_key.set_contents_from_string( the_hex_md5 + a_separator + the_file_path )
+        
+        an_id, a_bucket_name = generate_id( the_study_object._id, a_located_file, an_api_version )
+    
+        a_bucket = the_study_object.connection().create_bucket( a_bucket_name )
+
+        return TFileObject( the_study_object, a_key, a_bucket, an_id, the_hex_md5, the_file_path )
+
+    @staticmethod
+    def get( the_study_object, the_file_key ) :
+        a_key = get_key( the_study_object._bucket, the_file_key )
+        
+        an_api_version = the_study_object._api_version
+
+        a_hex_md5, a_file_path = None, None
+        try: # in case of broken entity
+            a_hex_md5, a_file_path = _read_file_props( a_key, an_api_version )
+        except :
+            pass
+    
+        an_id, a_bucket_name = generate_id( the_study_object._id, the_file_key, an_api_version )
+
+        a_bucket = None
+        try: # in case of broken entity
+            a_bucket = the_study_object.connection().get_bucket( a_bucket_name )
+        except :
+            pass
+
+        return TFileObject( the_study_object, a_key, a_bucket, an_id, a_hex_md5, a_file_path )
+
+    def __iter__( self ) :
+        "Iterates through file items"
+        for a_seed_key in self.iterator() :
+            yield TSeedObject.get( self, a_seed_key )
+            pass
+        
+        pass
+
+    def delete( self, the_number_threads, the_printing_depth ) :
+        print_d( "deleting - %s\n" % self, the_printing_depth )
+
+        a_worker_pool = WorkerPool( the_number_threads )
+
+        a_deleter = lambda the_object, the_printing_depth : \
+            the_object.delete( the_printing_depth )
+
+        for a_seed_object in self :
+            a_worker_pool.charge( a_deleter, ( a_seed_object, the_printing_depth + 1 ) )
+            pass
+
+        TSealingObject.delete( self )
+        
+        a_worker_pool.shutdown()
+        a_worker_pool.join()
+
+        if self._bucket != None : # in case of broken entity
+            self._bucket.delete()
+            pass
+        
+        self._key.delete()
+        pass
+
+    def seal( self, the_working_dir ) :
+        "To mark the everything was sucessfuly uploaded"
+        os.rmdir( the_working_dir )
+
+        TSealingObject.seal( self )
+        pass
+
+    pass
+
+
+#--------------------------------------------------------------------------------------
+def _seed_key_separator( the_api_version ) :
+    if the_api_version == 'dummy' :
+        return ':'
+
+    return ' % '
+
+
+#--------------------------------------------------------------------------------------
+def generate_seed_name( the_hex_md5, the_file_seed, the_api_version ) :
+    a_separator = _seed_key_separator( the_api_version )
+
+    if the_api_version == 'dummy' :
+        return '%s%s%s' % ( the_file_seed, a_separator, the_hex_md5 )
+
+    if the_api_version == '0.1' :
+        return '%s%s%s' % ( the_hex_md5, a_separator, the_file_seed )
+
+    return '%s%s%s' % ( the_file_seed, a_separator, the_hex_md5 )
+
+
+#--------------------------------------------------------------------------------------
+def _read_seed_props( the_seed_key_name, the_api_version ) :
+    a_separator = _seed_key_separator( the_api_version )
+
+    a_seed_name, a_hex_md5 = None, None
+    try:
+        if the_api_version == 'dummy' :
+            a_seed_name, a_hex_md5 = the_seed_key_name.split( a_separator )
+        elif the_api_version == '0.1' :
+            a_hex_md5, a_seed_name = the_seed_key_name.split( a_separator )
+        else :
+            a_seed_name, a_hex_md5 = the_seed_key_name.split( a_separator )
+            pass
+    except :
+        pass
+
+    return a_hex_md5, a_seed_name
+
+
+#--------------------------------------------------------------------------------------
+class TSeedObject :
+    "Represents S3 dedicated implementation of item object"
+
+    def __init__( self, the_file_object, the_key, the_name, the_hex_md5 ) :
+        "Use static corresponding functions to an instance of this class"
+        self._file_object = the_file_object
+
+        self._key = the_key
+        self._name = the_name
+        self._hex_md5 = the_hex_md5
+
+        pass
+    
+    def name( self ) :
+        return self._name
+
+    def hex_md5( self ) :
+        return self._hex_md5
+
+    def download( self, the_file_path ) :
+        self._key.get_contents_to_filename( the_file_path )
+        pass
+
+    def __str__( self ) :
+        return "%s" % ( self._key )
+
+    @staticmethod
+    def create( the_file_object, the_seed_name, the_seed_path ) :
+        a_file_pointer = open( the_seed_path, 'rb' )
+
+        from balloon.common import compute_md5
+        a_md5 = compute_md5( a_file_pointer )
+        a_hex_md5, a_base64md5 = a_md5
+
+        an_api_version = the_file_object.api_version()
+        a_seed_name = generate_seed_name( a_hex_md5, the_seed_name, an_api_version )
+
+        a_seed_key = get_key( the_file_object._bucket, a_seed_name )
+        # a_part_key.set_contents_from_file( a_file_pointer, md5 = a_md5 ) # this method is not thread safe
+        a_seed_key.set_contents_from_file( a_file_pointer, headers = { 'Content-Type' : 'application/x-tar' } )
+        
+        a_file_pointer.close()
+        os.remove( the_seed_path )
+
+        return TSeedObject( the_file_object, a_seed_key, the_seed_name, a_hex_md5 )
+
+    @staticmethod
+    def get( the_file_object, the_seed_key ) :
+        an_api_version = the_file_object.api_version()
+
+        a_hex_md5, a_seed_name = _read_seed_props( get_key_name( the_seed_key ), an_api_version )
+
+        return TSeedObject( the_file_object, the_seed_key, a_seed_name, a_hex_md5 )
+
+    def delete( self, the_printing_depth ) :
+        print_d( "deleting - %s\n" % self, the_printing_depth )
+
+        self._key.delete()
+
+        pass
+
+    pass
+
+
+#--------------------------------------------------------------------------------------
+
