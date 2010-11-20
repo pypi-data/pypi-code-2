@@ -1,0 +1,1 @@
+import collective.skinny.patch
