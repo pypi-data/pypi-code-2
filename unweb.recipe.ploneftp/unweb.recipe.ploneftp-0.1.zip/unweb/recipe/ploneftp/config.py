@@ -1,0 +1,6 @@
+tmp_dir = "/tmp/PloneFTP"
+zope_ftp_address = "127.0.0.1:8021"
+address = "21"
+login_message = "Welcome to Plone FTP. Your uploaded file may not be visible in FTP when the upload has finished. Go to your Plone site member folder to see your file."
+logout_message = "Thanks for using Plone FTP!"
+path  = "/Plone/Members/%s"
