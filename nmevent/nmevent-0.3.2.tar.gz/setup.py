@@ -1,0 +1,37 @@
+# -*- coding: utf8 -*-
+
+# from distutils.core import setup
+from setuptools import setup
+import sys
+
+sys.path.insert(1, 'nmevent')
+import nmevent
+
+setup(
+	name             = 'nmevent',
+	version          = nmevent.__version__,
+	author           = 'Jan Milík',
+	author_email     = 'milikjan@fit.cvut.cz',
+	description      = 'A simple C#-like implementation of the Observer design pattern.',
+	long_description = nmevent.__doc__,
+	url              = 'http://pypi.python.org/pypi/nmevent',
+	
+	package_dir = {'': 'nmevent'},
+	py_modules  = ['nmevent'],
+	provides    = ['nmevent'],
+	# packages  = ['nmevent', ],
+	keywords    = 'library event observer pattern',
+	license     = 'Lesser General Public License v3',
+	
+	test_suite = 'test.test_nmevent',
+	
+	classifiers = [
+		'Development Status :: 3 - Alpha',
+		'Intended Audience :: Developers',
+		'License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)',
+		'Natural Language :: English',
+		'Operating System :: OS Independent',
+		'Programming Language :: Python :: 2.6',
+	]
+)
+
