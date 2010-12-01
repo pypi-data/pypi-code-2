@@ -1,0 +1,414 @@
+# -*- coding: utf-8 -*-
+#
+#  Deterministic Arts Utilities
+#  Copyright (c) 2010 Dirk Esser
+#
+#  Permission is hereby granted, free of charge, to any person obtaining a copy
+#  of this software and associated documentation files (the "Software"), to deal
+#  in the Software without restriction, including without limitation the rights
+#  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#  copies of the Software, and to permit persons to whom the Software is
+#  furnished to do so, subject to the following conditions:
+#
+#  The above copyright notice and this permission notice shall be included in
+#  all copies or substantial portions of the Software.
+#
+#  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+#  THE SOFTWARE.
+
+"""Simple event publisher
+
+This module provides class for simple event publishing. The basic concept
+here is the `Publisher`, which represents a set of registered listeners.
+Listeners may either be functions or methods on arbitrary objects. The 
+module supports weak references (in either case) to listeners.
+
+You may use this module in order to implement `C#` style event handling.
+The facility provided here is intended primarily for use cases, where
+there is a somewhat strong coupeling between the origin of an event and
+handlers for it. It is less applicable for situations, where the coupeling
+is only weak.
+
+Example::
+
+    >>> from darts.lib.event import Subscription, Publisher
+    >>> class ActiveObject(object):
+    ...
+    ...     def __init__(self):
+    ...         super(ActiveObject, self).__init__()
+    ...         self.property_change = Publisher()
+    ...         self._name = None
+    ...
+    ...     def _get_name(self):
+    ...         return self._name
+    ...
+    ...     def _set_name(self, value):
+    ...         self._name = name
+    ...         self.property_change.publish(self, 'name')
+    ...
+    ...     name = property(_get_name, _set_name)
+    ...
+    >>> ob = ActiveObject()
+    >>> ob
+    <ActiveObject at ...>
+    >>> def listener(sender, property):
+    ...    print sender, "changed value of property", property
+    >>> ob.subscribe(listener)
+    <SFHandle ...>
+    >>> ob.name = "foo"
+    <ActiveObject at ...> changed value of property name
+    >>> ob.name
+    foo
+"""
+
+from __future__ import with_statement
+
+from sys import exc_info
+from weakref import ref as WeakRef
+from threading import RLock
+
+__all__ = ('Subscription', 'Publisher', 'ReferenceRetention',)
+
+class Subscription(object):
+
+    """Handle with a publisher
+
+    Instances of this class represent subscriptions of listener
+    to event publishers. The subscription object can be used to 
+    cancel the subscription, if event notification is no longer
+    required.
+
+    Handle objects are immutable after construction.
+
+    This class is not intended for subclassing outside of this
+    module.
+    """
+
+    __slots__ = ('__weakref__',)
+
+    def cancel(self):
+
+        """Cancels the subscription
+        
+        This method cancels the subscription. The listener will no longer rceive
+        event notifications. If, however, there is currently a `publish` call in
+        progress on the publisher, this subscription was obtained from, it is 
+        undefined, whether the listener will receive notifications for any such
+        pending call.
+        
+        This method returns true, if the listener was unsubscribed due to the call
+        to this method, and false, if it had already been unsubscribed and thus,
+        the call did nothing.
+        """
+        
+        raise NotImplementedError
+
+        
+class Handle(Subscription):
+
+    __slots__ = ('_Handle__publisher',)
+
+    def __new__(klass, publisher):
+        self = object.__new__(klass)
+        self.__publisher = publisher
+        return self
+
+    def cancel(self):
+        return self.__publisher._Publisher__forget(self)
+
+    def __is_alive(self):
+
+        """(internal)
+
+        Called by a publisher in order to test, whether this subscription is still
+        alive and should receive notifications. The implementatin must be provided 
+        by subclasses. This implementation raises an exception.
+        """
+
+        raise NotImplementedError
+
+    def __invoke(self, args, keys):
+
+        """(internal)
+
+        Called by a publisher in order to invoke the actual listener. The given `args`
+        and `keys` are the positional arguments sequence/keyword argument dictionary
+        to pass along. If the listener has been invalidated by garbage collection,
+        the call must be ignored. The implementation must be provided by subclasses. 
+        This implementation raises an exception.
+        """
+
+        raise NotImplementedError
+
+    
+class SFHandle(Handle):
+
+    """(internal)
+
+    This kind of subscription is used for strong references to functions (or
+    targets, whose `__call__` method should be called.)
+    """
+
+    __slots__ = (
+        '_SFHandle__function',
+    )
+
+    def __new__(klass, publisher, function):
+        self = Handle.__new__(klass, publisher)
+        self.__function = function
+        return self
+
+    def _Handle__is_alive(self):
+        return True
+
+    def _Handle__invoke(self, args, keys):
+        self.__function(*args, **keys)
+        return True
+
+    def __str__(self):
+        return "<SFHandle %r at 0x%x>" % (self.__function, id(self),)
+
+    __repr__ = __str__
+
+
+class WFHandle(Handle):
+
+    """(internal)
+
+    This kind of subscription is used for weak references to functions (or
+    targets, whose `__call__` method should be called.)
+    """
+
+    __slots__ = (
+        '_WFHandle__function',
+    )
+
+    def __new__(klass, publisher, function):
+        self = Handle.__new__(klass, publisher)
+        self.__function = WeakRef(function)
+        return self
+
+    def _Handle__is_alive(self):
+        return self.__function() is not None
+
+    def _Handle__invoke(self, args, keys):
+        function = self.__function()
+        if function is None: return False
+        else:
+            function(*args, **keys)
+            return True
+
+    def __str__(self):
+        function = self.__function()
+        if function is None: return "<WFHandle (dead) at 0x%x>" % (id(self),)
+        return "<SFHandle %r at 0x%x>" % (self.__function, id(self),)
+
+    __repr__ = __str__
+
+
+
+class WMHandle(Handle):
+
+    """(internal)
+
+    This kind of subscription is used for weak references to objects, when
+    the method to call is not `__call__`.
+    """
+
+    __slots__ = (
+        '_WMHandle__target',
+        '_WMHandle__method',
+    )
+
+    def __new__(klass, publisher, target, method):
+        self = Handle.__new__(klass, publisher)
+        self.__target = WeakRef(target)
+        self.__method = method
+        return self
+
+    def _Handle__is_alive(self):
+        return self.__target() is not None
+
+    def _Handle__invoke(self, args, keys):
+        target = self.__target()
+        if target is None: return False
+        else:
+            getattr(target, self.__method)(*args, **keys)
+            return True
+
+    def __str__(self):
+        target = self.__target()
+        if target is None:
+            return "<WMHandle (dead).%s at 0x%x>" % (self.__method, id(self),)
+        return "<WMHandle %r.%s at 0x%x>" % (target, self.__method, id(self),)
+
+    __repr__ = __str__
+
+
+class ReferenceRetention(object):
+
+    """Reference Retention Policy
+    
+    This enumeration describes, how a publisher should remember a given
+    listener. The publisher may either use a plain, strong reference,
+    which ensures, that the listener is kept as long as the publisher is
+    alive or the subscription is cancelled, or a weak reference, which
+    will automatically remove the listener, if the publisher is the only
+    place in the process, which has references to it.
+    """
+
+    @staticmethod
+    def STRONG(publisher, target, method):
+
+        """Strong reference
+
+        Use this value as reference retention policy in order to force
+        a publisher to keep a strong reference to your listener around.
+        This is actually the default value.
+        """
+        if method == '__call__': return SFHandle(publisher, target)
+        return SFHandle(publisher, getattr(target, method))
+
+    @staticmethod
+    def WEAK(publisher, target, method):
+
+        """Weak reference
+
+        Use this value as reference retention policy in order to force
+        a publisher to remember your listener using a weak reference.
+        This allows Python's garbage collector to delete the listener
+        even while it is still subscribed to a publisher.
+        """
+        if method == '__call__': return WFHandle(publisher, target)
+        return WMHandle(publisher, target, method)
+
+
+WEAK = ReferenceRetention.WEAK
+STRONG = ReferenceRetention.STRONG
+
+class Publisher(object):
+
+    """Event publisher
+    
+    Instances of this class allow the dispatching of event notifications
+    to interested parties. In order to receive notifications, listeners
+    must be subscribed to the publisher. 
+
+    Subclassing. You may create subclasses of this class in order to 
+    customize exception handling during `publish` calls. You may use the 
+    `_lock` instance variable (an instance of `RLock`) in order to provide 
+    thread synchronization if this is required during exception handling.
+    """
+
+    __slots__ = (
+        '__weakref__',
+        '_Publisher__subscriptions',
+        '_lock',
+    )
+
+    def __init__(self):
+        super(Publisher, self).__init__()
+        self.__subscriptions = ()
+        self._lock = RLock()
+        
+    def subscribe(self, listener, method="__call__", reference_retention=STRONG):
+        
+        """Subscribe a listener
+        
+        This method adds `listener` as new listener to receive event
+        notifications via this publisher. If `method` is `None`, the
+        listener should be a callable object, i.e., it should provide
+        an implementation for method `__call__`, otherwise `method` 
+        should be the name of the method to call on `listener` whenever
+        an event occurs.
+        
+        The `reference_retention` value determines, whether the publisher
+        keeps a strong reference to the listener around. It may be one
+        of the constant values `WEAK` or `STRONG` defined in this module.
+        If `WEAK` the listener will only be kept using a weak reference,
+        and if `STRONG`, the listener will be remembered using a full
+        (strong) reference.
+        
+        This method returns a subscription object, which can be used
+        to cancel the subscription made. 
+
+        Subclassing. This method is not intended to be overridden by
+        subclasses.
+        """
+        
+        if listener is None:
+            raise ValueError, "listener must not be None"
+        if reference_retention not in (WEAK, STRONG):
+            raise ValueError, "unsupported reference retention policy"
+        if not isinstance(method, str):
+            raise ValueError, "method must be a string"
+        subscription = reference_retention(self, listener, method)
+        with self._lock:
+            buffer = list()
+            for element in self.__subscriptions:
+                if element._Handle__is_alive():
+                    buffer.append(element)
+            buffer.append(subscription)
+            self.__subscriptions = tuple(buffer)
+        return subscription
+            
+    def __forget(self, subscription):
+
+        """(internal)
+
+        Removes the subscription passed in as `subscription`. This
+        method also uses the chance to clean-up dead subscription which
+        have been invalidated by garbage collection.
+        """
+
+        buffer = list()
+        seen = False    
+        with self._lock:
+            for element in self.__subscriptions:
+                if element is subscription:
+                    seen = True
+                elif element._Handle__is_alive():
+                    buffer.append(element)
+            self.__subscriptions = tuple(buffer)
+        return seen
+    
+    def publish(self, *args, **keys):
+        
+        """Publish an event
+        
+        This method notifies all subscribed listeners, that an event
+        has occurred. The given arguments `args` and `keys` will be 
+        passed down to each listener called.
+
+        Subclassing. This method is not intended to be overridden by
+        subclasses. Also note, that the `_lock` is *not* held during 
+        the invocation of this method.
+        """
+
+        subscriptions = self._Publisher__subscriptions    # Long live the GIL...
+        for subscription in subscriptions:
+            try:
+                subscription._Handle__invoke(args, keys)
+            except:
+                exception, value, traceback = exc_info()
+                self._handle_exception(exception, value, traceback, subscription, args, keys)
+
+    def _handle_exception(self, exception, value, traceback, subscription, args, keys):
+        
+        """Called to handle exceptions during publishing
+
+        This method is called to handle the exception `exception` (with value
+        `value` and traceback `traceback`) which occurred during the invocation
+        of `subscription` with the given arguments `args` and `keys`. The 
+        default implementation provided here simply re-raises the exception.
+        This method may be overridden in subclasses in order to provide a
+        customized exception handling.
+        """
+
+        raise exception, value, traceback
+
