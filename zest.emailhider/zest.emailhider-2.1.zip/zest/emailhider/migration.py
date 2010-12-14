@@ -1,0 +1,10 @@
+PROFILE_ID = 'profile-zest.emailhider:default'
+
+
+def install_pyproxy(context):
+    # This is a new dependency.
+    context.runAllImportStepsFromProfile('profile-jquery.pyproxy:default')
+
+
+def run_kss_step(context):
+    context.runImportStepFromProfile(PROFILE_ID, 'kssregistry')
