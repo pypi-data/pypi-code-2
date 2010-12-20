@@ -1,0 +1,12 @@
+from pyramid.config import Configurator
+from zopyx_gridfs.resources import Root
+
+def main(global_config, **settings):
+    """ This function returns a Pyramid WSGI application.
+    """
+    print settings
+    zcml_file = settings.get('configure_zcml', 'configure.zcml')
+    config = Configurator(root_factory=Root, settings=settings)
+    config.load_zcml(zcml_file)
+    return config.make_wsgi_app()
+
