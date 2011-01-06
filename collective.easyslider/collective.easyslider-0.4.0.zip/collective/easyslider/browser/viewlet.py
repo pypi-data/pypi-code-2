@@ -1,0 +1,61 @@
+from Products.Five.browser.pagetemplatefile import ViewPageTemplateFile
+from plone.app.layout.viewlets.common import ViewletBase
+from collective.easyslider.settings import PageSliderSettings
+from collective.easyslider.interfaces import ISliderPage
+from base import AbstractSliderView
+from plone.memoize.instance import memoize
+from Acquisition import aq_inner
+
+try:
+    from collective.easytemplate.engine import getTemplateContext
+    from collective.easytemplate.utils import applyTemplate
+    easytemplate_installed = True
+except:
+    easytemplate_installed = False
+
+import logging
+
+logger = logging.getLogger('collective.easyslider')
+
+class BaseSliderViewlet(ViewletBase):
+    
+    @memoize
+    def get_settings(self):
+        return PageSliderSettings(self.context)
+    
+    settings = property(get_settings)
+    
+    @memoize
+    def get_show(self):
+        if not ISliderPage.providedBy(self.context):
+            return False
+        else:
+            if len(self.settings.slides) == 0:
+                return False
+            else:
+                return self.settings.show
+                
+    show = property(get_show)
+
+class EasySlider(BaseSliderViewlet):
+
+    render = ViewPageTemplateFile('viewlet.pt')
+                
+    def render_slide(self, slide):
+        if not easytemplate_installed or not self.settings.easytemplate_enabled:
+	    return slide
+
+        context = getTemplateContext(self.context, expose_schema=False)
+        text, errors = applyTemplate(context, slide, logger)
+        
+        if errors:
+            return slide
+        else:
+	    return text
+
+
+class EasySliderHead(BaseSliderViewlet, AbstractSliderView):
+    
+    render = ViewPageTemplateFile('headviewlet.pt')
+    
+    
