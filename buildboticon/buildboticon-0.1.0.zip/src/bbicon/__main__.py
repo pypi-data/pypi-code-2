@@ -1,0 +1,2 @@
+import bbicon
+bbicon.main()
