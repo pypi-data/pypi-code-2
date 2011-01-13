@@ -1,0 +1,107 @@
+from Acquisition import aq_inner
+
+from Products.Five import BrowserView
+#from Products.Five.browser.pagetemplatefile import ViewPageTemplateFile
+from zope.app.pagetemplate.viewpagetemplatefile import ViewPageTemplateFile
+
+from zope.component import getMultiAdapter
+from zope.interface import implements
+
+from plone.memoize import view
+
+from collective.imagetags.browser.interfaces import IImageTagsImage
+
+class ImageTagsImage(BrowserView):
+    """ Used to display the tagged image (i.e., the image with all its tags)
+    """
+
+    implements(IImageTagsImage)
+
+    def __init__(self, context, request):
+        self.context = aq_inner(context)
+        self.request = request
+        self.embedded = True
+        manage = getMultiAdapter((context, request), name="imagetags-manage")
+        self.tags = manage.get_sorted_tags()
+        self.default_image = manage.default_image
+        helper = manage.helper
+        self.iframe_enabled = helper.settings.iframe_enabled
+        self.taglist_height = helper.settings.iframe_taglist_height
+        
+        
+    def __call__(self, name=None, embedded=True, iframe=False, full_screen=True):
+        """ When called, set self.image according to "name" parameter
+        """
+        self.iframe = iframe
+        self.embedded = embedded or iframe
+        self.full_screen = full_screen
+        if not name is None:
+            parts = name.split('_')
+            field_name = parts[0]
+            scale_name = ''
+            if len(parts)>1:
+               scale_name= parts[1]
+            field = self.context.getField(field_name)
+            if field:
+                if scale_name != '' and scale_name in field.getAvailableSizes(self.context):
+                    self.image = '%s_%s' % (field_name, scale_name)
+                else:
+                    self.image = field_name
+                    
+                self.full_image = field_name
+                
+        else:
+            pass
+
+        return self.index()
+        
+    def available_sizes(self, field_name):
+        """ List of (scale_name, (width, height)) for image field (denoted by field_name)
+            in current object
+        """
+        if '_' in field_name:
+            field_name = field_name.split('_')[0]
+        field = self.context.getField(field_name)
+        sizes = field.getAvailableSizes(self.context)
+
+        # Sorting function
+        def my_sort(x,y):
+            return sizes[x][0]-sizes[y][0]
+
+        keys = sizes.keys()
+        keys.sort(my_sort)
+        
+        image = field.get(self.context)
+
+        sorted_sizes = []
+        # remove zero sizes
+        for size in keys:
+            if sizes[size][0] > 0:
+               scale = field.getScale(self.context, scale=size)
+               sorted_sizes.append((size, (scale.width, scale.height)))
+               
+        sorted_sizes.append(('original', (image.width, image.height)))
+        return sorted_sizes
+
+    
+    def tag_box(self, id, data):
+        """
+        A call to a pagetemplate file
+        """
+        template = ViewPageTemplateFile('templates/tag_box.pt')
+        return template(self, id=id, data=data)
+        
+    def tag_title(self, id, data):
+        """
+        A call to a pagetemplate file
+        """
+        template = ViewPageTemplateFile('templates/tag_title.pt')
+        return template(self, id=id, data=data)
+
+    @view.memoize
+    def portal_url(self):
+        """ Helper method required by tag_box
+        """
+        portal_state = getMultiAdapter((self.context, self.request), name=u'plone_portal_state')
+        return portal_state.portal_url()
+
