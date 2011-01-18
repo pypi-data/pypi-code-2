@@ -1,0 +1,1 @@
+from megrok.resourceviewlet.components import ResourcesManager, ResourceViewlet
