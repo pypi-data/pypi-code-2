@@ -1,0 +1,1 @@
+"""UnicodeLexicon tests package."""
