@@ -1,0 +1,58 @@
+import unittest
+
+from sqlalchemy import func
+
+import amalgam
+
+
+def make_models(db):
+    Base = db('my')
+
+    class Test(db.Base):
+        name = db.String(50)
+        pubdate = db.DateTime(default=func.now())
+
+        class Meta:
+            tablename = 'some'
+
+
+    class Another(Base):
+        title = db.String(50)
+        test = db.ForeignKey(Test, backref='anothers')
+        owner = db.ForeignKey(Test, backref='owned', nullable=True)
+
+    return Test, Another
+
+
+class BaseTest(unittest.TestCase):
+    def setUp(self):
+        self.db = amalgam.amalgam('sqla', 'sqlite://')
+        self.Test, self.Another = make_models(self.db)
+
+        self.db.create_all()
+
+    def tearDown(self):
+        self.db.drop_all()
+
+    def test_tablenames(self):
+        self.assertEquals(self.Test.__tablename__, 'some')
+        self.assertEquals(self.Another.__tablename__, 'my_another')
+
+    def test_insert(self):
+        t = self.Test(name=u'test')
+        t.save()
+        self.db.session.commit()
+
+        t = self.Test.query.first()
+        self.assertEquals(t.name, u'test')
+        assert t.pubdate
+
+    def test_fk(self):
+        t = self.Test(name=u'test')
+        a = self.Another(title=u'quest', test=t)
+        t.save()
+        a.save()
+        self.db.session.commit()
+
+        self.assertEquals(self.Another.query.first().test.id, t.id)
+        self.assertEquals(self.Test.query.first().anothers[0], a)
