@@ -1,0 +1,1 @@
+COMMENTS_RENDER_METHOD = 'text'
