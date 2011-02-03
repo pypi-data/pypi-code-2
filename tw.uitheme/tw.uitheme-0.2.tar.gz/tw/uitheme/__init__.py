@@ -1,0 +1,28 @@
+from tw.api import CSSLink
+
+# declare your static resources here
+
+blacktie_css = CSSLink(modname=__name__, filename='static/black-tie/jquery-ui-1.8.2.custom.css')
+blitzer_css = CSSLink(modname=__name__, filename='static/blitzer/jquery-ui-1.8.2.custom.css')
+cupertino_css = CSSLink(modname=__name__, filename='static/cupertino/jquery-ui-1.8.2.custom.css')
+darkhive_css = CSSLink(modname=__name__, filename='static/dark-hive/jquery-ui-1.8.2.custom.css')
+dotluv_css = CSSLink(modname=__name__, filename='static/dot-luv/jquery-ui-1.8.2.custom.css')
+eggplant_css = CSSLink(modname=__name__, filename='static/eggplant/jquery-ui-1.8.2.custom.css')
+excitebike_css = CSSLink(modname=__name__, filename='static/excite-bike/jquery-ui-1.8.2.custom.css')
+flick_css = CSSLink(modname=__name__, filename='static/flick/jquery-ui-1.8.2.custom.css')
+hotsneaks_css = CSSLink(modname=__name__, filename='static/hot-sneaks/jquery-ui-1.8.2.custom.css')
+humanity_css = CSSLink(modname=__name__, filename='static/humanity/jquery-ui-1.8.2.custom.css')
+lefrog_css = CSSLink(modname=__name__, filename='static/le-frog/jquery-ui-1.8.2.custom.css')
+mintchoc_css = CSSLink(modname=__name__, filename='static/mint-choc/jquery-ui-1.8.2.custom.css')
+overcast_css = CSSLink(modname=__name__, filename='static/overcast/jquery-ui-1.8.2.custom.css')
+peppergrinder_css = CSSLink(modname=__name__, filename='static/pepper-grinder/jquery-ui-1.8.2.custom.css')
+redmond_css = CSSLink(modname=__name__, filename='static/redmond/jquery-ui-1.8.2.custom.css')
+smoothness_css = CSSLink(modname=__name__, filename='static/smoothness/jquery-ui-1.8.9.custom.css')
+southstreet_css = CSSLink(modname=__name__, filename='static/south-street/jquery-ui-1.8.2.custom.css')
+start_css = CSSLink(modname=__name__, filename='static/start/jquery-ui-1.8.2.custom.css')
+sunny_css = CSSLink(modname=__name__, filename='static/sunny/jquery-ui-1.8.2.custom.css')
+swankypurse_css = CSSLink(modname=__name__, filename='static/swanky-purse/jquery-ui-1.8.2.custom.css')
+trontastic_css = CSSLink(modname=__name__, filename='static/trontastic/jquery-ui-1.8.2.custom.css')
+uidarkness_css = CSSLink(modname=__name__, filename='static/ui-darkness/jquery-ui-1.8.2.custom.css')
+uilightness_css = CSSLink(modname=__name__, filename='static/ui-lightness/jquery-ui-1.8.2.custom.css')
+vader_css = CSSLink(modname=__name__, filename='static/vader/jquery-ui-1.8.2.custom.css')
