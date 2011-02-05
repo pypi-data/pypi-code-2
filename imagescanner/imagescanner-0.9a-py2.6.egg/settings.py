@@ -1,0 +1,4 @@
+import logging
+LOGGING_LEVEL = logging.INFO
+ENABLE_TEST_BACKEND = False
+ENABLE_NET_BACKEND = False 
