@@ -1,0 +1,42 @@
+try:
+    from setuptools import setup, find_packages
+except ImportError:
+    from ez_setup import use_setuptools
+    use_setuptools()
+    from setuptools import setup, find_packages
+try:
+    from distutils.command.build_py import build_py_2to3 as build_py
+except ImportError:
+    # 2.x
+    from distutils.command.build_py import build_py
+
+from ckanclient import __version__, __description__, __long_description__, __license__
+
+import os
+
+setup(
+    name='ckanclient',
+    version=__version__,
+    author='Appropriate Software Foundation, Open Knowledge Foundation',
+    author_email='info@okfn.org',
+    license=__license__,
+    url='http://www.okfn.org/ckan/',
+    description=__description__,
+    keywords='data packaging component tool client',
+    long_description =__long_description__,
+    install_requires=[
+        # only required if python <= 2.5 (as json library in python >= 2.6)
+        # 'simplejson',
+    ],
+    packages=find_packages(exclude=['ez_setup']),
+    include_package_data=True,
+    always_unzip=True,
+    classifiers = [
+        'Development Status :: 4 - Beta',
+        'Intended Audience :: Developers',
+        'Operating System :: OS Independent',
+        'Programming Language :: Python',
+        'Topic :: Software Development :: Libraries :: Python Modules'],
+    test_suite = 'nose.collector',
+    cmdclass = { 'build_py': build_py },
+)
