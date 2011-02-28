@@ -1,0 +1,1066 @@
+'''
+Implementation of PADDLE.
+
+The two main functions are learn(), to actually run the algorithm, and init(),
+to initialize the algorithm variables.
+
+All other functions are internal, used in the implementation of the
+above-mentioned two.
+As such, their names begin with an underscore.
+'''
+import numpy as NP
+import time, sys, glob, os
+sys.path.append('.')
+from scipy import linalg as la
+from scipy import stats
+import scipy as sp
+import pylab
+from common import _cost_rec, _cost_cod, _st, _replaceAtoms, _saveDict, sparsity
+ra = sp.random
+
+    
+def _cost(X, U, D, C, pars):
+    '''
+    Evaluation of the cost function.
+    '''
+    full_out = {
+        'rec_err': _cost_rec(D, X, U, pars),
+        'l1_pen_U': 2*pars['tau_U'] * sp.absolute(U).mean(),
+        'l1_pen_D': 2*pars['tau_D'] * sp.absolute(D).mean(),
+        'l2_pen': pars['mu'] * (U**2).mean(),
+        }
+    E = full_out['rec_err'] + full_out['l1_pen_U'] + full_out['l1_pen_D'] + full_out['l2_pen']
+    if pars['eta'] > 0:
+        full_out['cod_err'] = _cost_cod(C, X, U, pars)
+        E += full_out['cod_err']
+    return E, full_out
+
+#def _cost_fast(X, U, D, CX, pars):
+#    '''
+#    Fast evaluation of the cost function.
+#    
+#    Computes the same cost function as in _cost, but exploits a precomputed
+#    CX and returns just the value of the whole cost function.
+#    '''
+#    return ((X - sp.dot(D, U))**2).mean() + pars['eta']*((U - CX)**2).mean() + 2*pars['tau'] * sp.absolute(U).mean() + pars['mu'] * (U**2).mean()
+
+def _ist_fixed(X, U0, D, C, pars, maxiter=1000):
+    '''
+    Iterative soft-thresholding with fixed step-size.
+
+    Minimization of :math:`\\frac{1}{d}\|X-DU\|_F^2+\\frac{\eta}{K}\|U-CX\|_F^2+\\frac{2\\tau}{K}\|U\|_1` wrt :math:`U`.
+    When :math:`\eta=0` the functional reduces to the well-known LASSO.
+
+    This function is curently noy used. The main function
+    :func:`paddle.dual.learn` uses its FISTA-accelerated counterpart
+    :func:`paddle.dual._pgd`.
+
+    Parameters
+    ----------
+    X : (d, N) ndarray
+        Data matrix
+    U0 : (K, N) ndarray
+        Initial value of the unknown 
+    D : (d, K) ndarray
+        Dictionary
+    C : (K, d) ndarray
+        Dual of the dictionary
+    pars : dict
+        Optional parameters
+    maxiter : int
+        Maximum number of iterations allowed (default 500)
+        
+    Returns
+    -------
+    U : (K, N) ndarray
+        Optimal value of the unknown
+    full_out : dict
+        Full output
+    '''
+    # gets the dimensions
+    d, N = X.shape
+    K = D.shape[1]
+
+    U = U0.copy()
+    DtD = sp.dot(D.T, D)
+    ew = la.eigvalsh(DtD) 
+    sigma0 = (ew.min() + ew.max()) / (2*N*d) + (pars['mu'] + pars['eta'])/(N*K)
+    Y = U # no need to copy here
+    sigma = sigma0
+    E, full_out = _cost(X, U, D, C, pars)
+    #print '   initial energy = %.5e' % E
+    if pars['verbose']:
+        print '   iter   energy   avg|upd|'
+    # pre-computes what is needed in the loop
+    DtD /= (N*d*sigma)
+    DtX = sp.dot(D.T, X) / (N*d*sigma)
+    CX = sp.dot(C, X)
+    U0 = pars['eta']*CX/(N*K*sigma) + DtX
+    f = (1 - (pars['mu']+pars['eta'])/(N*K*sigma))
+    A = DtD - f*sp.identity(K)
+    for i in xrange(maxiter):
+        Unew = _st(U0 - sp.dot(A, Y), pars['tau']/(N*K*sigma))
+        E_new = _cost_fast(X, Unew, D, CX, pars)
+        if i%1 == 0 and pars['verbose']:
+            upd = sp.sum((Unew-U)**2, 0)/sp.sum(U**2, 0)
+            upd = upd[sp.isfinite(upd)]
+            print '   %4d  %8.5e     %4.2f' % (i, E_new, upd.mean())
+        Y = Unew
+        U = Unew
+        if sp.absolute(E-E_new)/E < pars['rtol']:
+            break
+        E = E_new
+    #print '   energy after %d iter. = %.5e' % (i+1, E)
+    dummy, full_out = _cost(X, Unew, D, C, pars)
+    return U, full_out
+
+def _ist(X, U0, D, C, pars, maxiter=1000):
+    '''
+    Iterative soft-thresholding with FISTA acceleration.
+
+    Minimization of :math:`\\frac{1}{d}\|X-DU\|_F^2+\\frac{\eta}{K}\|U-CX\|_F^2+\\frac{2\\tau}{K}\|U\|_1` wrt :math:`U`.
+    When :math:`\eta=0` the functional reduces to the well-known LASSO.
+
+    The function is used by :func:`paddle.dual.learn` for the optimization
+    wrt ``U``.
+
+    Parameters
+    ----------
+    X : (d, N) ndarray
+        Data matrix
+    U0 : (K, N) ndarray
+        Initial value of the unknown 
+    D : (d, K) ndarray
+        Dictionary
+    C : (K, d) ndarray
+        Dual of the dictionary
+    pars : dict
+        Optional parameters
+    maxiter : int
+        Maximum number of iterations allowed (default 500)
+        
+    Returns
+    -------
+    U : (K, N) ndarray
+        Optimal value of the unknown
+    full_out : dict
+        Full output
+    '''
+    ######## gets the dimensions
+    d, N = X.shape
+    K = D.shape[1]
+    ######## initial evaluation of the cost function
+    E, full_out = _cost(X, U0, D, C, pars)
+    #print '   initial energy = %.5e' % E
+    if pars['verbose']:
+        print '   iter   energy   avg|upd|'
+    ######## fixed-step sigma
+    DtD = sp.dot(D.T, D)
+    # computes only the largest eigenvalue
+    ewmax = la.eigvalsh(DtD, eigvals=(K-1, K-1)) 
+    sigma0 = ewmax/(N*d) + (pars['mu'] + pars['eta'])/(N*K)
+    ######## FISTA initialization
+    U = U0.copy()
+    t = 1 # used in FISTA
+    Y = U.copy() # needed by FISTA
+    ####### pre-computes what is needed in the loop
+    DtD /= (N*d*sigma0)
+    DtX = sp.dot(D.T, X) / (N*d*sigma0)
+    if C != None:
+        CX = sp.dot(C, X)
+    else:
+        CX = sp.zeros(U.shape)
+    # constant part of the gradient descent step
+    U0 = pars['eta']*CX/(N*K*sigma0) + DtX
+    # first-order part of the gradient descent step
+    f = (1 - (pars['mu']+pars['eta'])/(N*K*sigma0))
+    A = DtD - f*sp.identity(K)
+    ####### begin loop
+    for i in xrange(maxiter):
+        # compute gradient step and soft-thresholding
+        Unew = _st(U0 - sp.dot(A, Y), pars['tau']/(N*K*sigma0))
+        # evaluates the cost function
+        E_new = _cost_fast(X, Unew, D, CX, pars)
+        if i%1 == 0 and pars['verbose']:
+            upd = sp.sum((Unew-U)**2, 0)/sp.sum(U**2, 0)
+            upd = upd[sp.isfinite(upd)]
+            print '   %4d  %8.5e     %4.2f' % (i, E_new, upd.mean())
+        # FISTA from Beck and Teboulle, SIAM J. Imaging Science, 2009
+        tnew = (1 + sp.sqrt(1 + 4*(t**2))) / 2
+        Y = Unew + ((t-1)/tnew)*(Unew - U)
+        t = tnew
+        U = Unew       
+        # check convergence
+        if sp.absolute(E-E_new)/E < pars['rtol']:
+            break
+        E = E_new
+    ####### final evaluation of the cost function
+    #print '   energy after %d iter. = %.5e' % (i+1, E)
+    dummy, full_out = _cost(X, Unew, D, C, pars)
+    return U, full_out
+
+def _pgd_fixed(A0, X, U, B, G2, cost, maxiter=500, pars=None, sigma=None, axis=0, bound=1):
+    '''
+    Projected gradient descent with fixed stepsize.
+    '''
+    A = A0.copy()
+    if sigma == None:
+        # eigenvalues of the second derivatives matrix
+        ew = la.eigvalsh(G2)
+        # (inverse) step length
+        sigma = (ew.min() + ew.max())/2
+    E = cost(A, X, U, pars)
+    for j in xrange(maxiter):
+        # gradient descent step
+        Anew = A + (1/sigma) * (B - sp.dot(A, G2))
+        # projections onto the ball
+        n = sp.sqrt(sp.sum(Anew**2, axis))
+        newshape = [-1, -1]
+        newshape[axis] = 1
+        n.shape = newshape
+        n = sp.where(n > bound, n, 1)
+        Anew /= n
+        #E, full_out = cost(X, U, Dnew, C, tau, mu, eta)
+        #print '   energy =', E
+        Enew = cost(Anew, X, U, pars)
+        if abs(Enew-E)/E < pars['rtol']:
+            break
+        A = Anew
+        E = Enew
+    return A, j
+
+def _pgd(Y0, ABt, BBt, cost, maxiter=500, axis=0, bound=1, verbose=False, rtol=1.e-4):
+    '''
+    Projected gradient descent with FISTA acceleration.
+
+    Minimization of :math:`\|A-YB\|_F^2` wrt :math:`Y`, under additional
+    constraints on the norms of the columns (or the rows) of :math:`Y`.
+    The minimization is performed by alternatively descending along the
+    gradient direction :math:`AB^T-YBB^T` and projecting the columns (rows)
+    of :math:`Y` on the ball with given radius.
+
+    The function is used by :func:`paddle.dual.learn` for the optimization
+    wrt ``D`` and ``C``.
+    In the former case, ``A`` and ``B`` are ``X`` and ``U``, respectively,
+    while in the latter the roles are swapped.
+
+    Parameters
+    ----------
+    Y0 : (a1, a2) ndarray
+        Initial value of the unknown
+    ABt : (a1, a2) ndarray
+        Part of the gradient
+    BBt : (a2, a2) ndarray
+        Part of the gradient
+    cost : function of type ``foo(Y)``
+        Evaluates the cost function 
+    maxiter : int
+        Maximum number of iterations allowed (default 500)
+    axis : int
+        Dimension of ``Y`` along which the constraint is active (0 for cols, 1 for rows, default is 0)
+    bound : float
+        Value of the constraint on the norms of the columns/rows of ``Y`` (default is 1)
+    verbose : bool
+        If True displays the value of the cost function at each iteration (default is False)
+    rtol : float
+        Relative tolerance for convergence criterion
+        
+    Returns
+    -------
+    Y : () ndarray
+        Optimal value of the unknown
+    j : int
+        Number of interations performed
+    '''
+    # initial value of the cost function
+    E = cost(Y0)
+    # fixed step-size used by FISTA
+    sigma = 2*la.norm(BBt)
+    # initialization
+    Y = Y0.copy()
+    t = 1 # used in FISTA
+    Z = Y.copy() # needed by FISTA
+    for j in xrange(maxiter):
+        ###### gradient descent step
+        Ynew = Z + (1/sigma) * (ABt - sp.dot(Z, BBt))
+        ###### projections onto the ball
+        if bound > 0:
+            # computes the norms
+            n = sp.sqrt(sp.sum(Ynew**2, axis))
+            # reshapes the norms depending on the direction of the constraint
+            newshape = [-1, -1]
+            newshape[axis] = 1
+            n.shape = newshape
+            # projects onto the ball with specified radius 
+            n = sp.where(n > bound, n/bound, 1)
+            Ynew /= n
+        ###### recompute cost function
+        Enew = cost(Ynew)
+        if verbose:
+            print '   energy =', Enew
+        if abs(Enew-E)/E < rtol:
+            break
+        ###### FISTA acceleration
+        tnew = (1 + sp.sqrt(1 + 4*(t**2))) / 2
+        Z = Ynew + ((t-1)/tnew)*(Ynew - Y)
+        t = tnew
+        Y = Ynew
+        E = Enew
+    return Y, j
+
+def _sgp_D(D, X, U, pars, maxiter=100, bbflag=True):
+    '''
+    Documentazione della funzione
+    '''
+    #(articolo riferimento)
+    
+    verbose, rtol, reg_par = pars['verbose'], pars['rtol_sgp'], pars['tau_D']
+
+    #stepsize choiche
+    if bbflag:
+        alphamin = 1.e-3;             		    # alpha lower bound
+        alphamax = 1.e5;					    # alpha upper bound
+        malpha = 3;                     	    # alphaBB1 memory
+        Valpha = alphamax * sp.ones((malpha,1));    # memory buffer for alpha
+        tau = 0.5;                      	    # alternating parameter
+        alpha = 0.3;                        
+    else:
+        alpha = 1.
+        
+    #controllare se va fatto    
+    X_low_bound = 1e-10;             	# Lower bound for the scaling matrix
+    X_upp_bound = 1e+10;             	# Upper bound for the scaling matrix
+
+    gamma = 1.e-04
+    beta = 0.4
+   
+    #computing fv 
+    def f(DU):
+        return ((X - DU)**2).sum()
+    #computing the gradient
+    def g(DU):
+        return sp.dot(-2*(X - DU), U.T) 
+    def _norma1(D):
+        return (sp.absolute(D)).sum()       
+    
+    DU = sp.dot(D, U)
+    fv = f(DU)+reg_par*_norma1(D)
+    Gv = g(DU)
+    
+    S = sp.ones(D.shape)
+
+    if verbose:
+        E, full_out = _cost(X, U, D, None, pars)
+        print '   Energy = %.5e' % E
+
+    #main loop
+    for i in xrange(maxiter):
+        fv_old = fv
+        if bbflag:
+            Valpha[0:malpha-2] = Valpha[1:malpha-1]
+        
+        Y = D - alpha*S*Gv
+        Y = _st(Y, reg_par*alpha)
+        #n = sp.sqrt(sp.sum(Y**2, 0)).reshape((1, -1))
+        #print len(sp.where(n < 1.e-8)[0])
+        #projection on the convex set        
+        Y = sp.clip(Y, 0, sp.inf)
+        # computes the norms
+        n = sp.sqrt(sp.sum(Y**2, 0)).reshape((1, -1))
+        #print len(sp.where(n < 1.e-8)[0])
+        # projects onto the ball with specified radius 
+        Y /= sp.where(n > 1., n, 1)
+
+        ddir = Y - D
+        lam = 1.
+        
+        fcont = True
+        
+        ddirU = sp.dot(ddir, U)
+        
+        while fcont:
+            Dplus = D + lam*ddir
+            DU_try = DU + lam*ddirU
+            
+            fv = f(DU_try)+reg_par*_norma1(Dplus)
+            
+            if fv <= fv_old + gamma*lam*(Gv*ddir).sum() or lam < 1.e-04:
+                D = Dplus
+                DU = DU_try
+                Gtemp = g(DU)
+                if bbflag:
+                    Sk = lam*ddir
+                    Yk = Gtemp - Gv
+                Gv = Gtemp
+                fcont = False
+            else:
+                lam = beta*lam
+        #print lam   
+        #S = NP.linalg.pinv(D).T
+        S = D
+        #S = sp.clip(S, -sp.inf, X_low_bound)
+        S = sp.clip(S, X_low_bound, X_upp_bound)
+        
+        #adaptive stepsize
+        if bbflag:
+            L = sp.ones(S.shape)
+            L /= S
+            Sk2 = Sk*L
+            Yk2 = Yk*S
+            bk = (Sk2*Yk).sum()
+            ck = (Yk2*Sk).sum()
+            if bk <= 0:
+                alpha1 = min(10*alpha, alphamax)
+            else:
+                alpha1BB = ((Sk2*Sk2).sum())/bk
+                alpha1 = min(alphamax, max(alphamin, alpha1BB))
+            if ck <= 0:
+                alpha2 = min(10*alpha, alphamax)
+            else:
+                alpha2BB = ck/(Yk2*Yk2).sum()
+                alpha2 = min(alphamax, max(alphamin, alpha2BB))
+            
+            Valpha[malpha-1] = alpha2
+            if alpha2/alpha1 <= tau:
+                alpha = Valpha.min()
+                tau = tau*0.9
+            else:
+                alpha = alpha1
+                tau = tau*1.1
+            #print alpha
+
+        if verbose:
+            E, full_out = _cost(X, U, D, None, pars)
+            print '   Energy = %.5e' % E
+
+        if sp.absolute(fv-fv_old)/sp.absolute(fv) < rtol:
+            break       
+    iters = i + 1
+    print 'somma D = %f iterazioni = %d' % (D.sum(), iters)
+    return D, iters
+
+
+
+def _sgp_U(D, X, U, pars, maxiter=100, bbflag=True):
+    '''
+    Documentazione della funzione
+    '''
+    
+    verbose, rtol, reg_par = pars['verbose'], pars['rtol_sgp'], pars['tau_U']
+    #(articolo riferimento)
+    
+    #stepsize choiche
+    if bbflag:
+        alphamin = 1.e-3;             		    # alpha lower bound
+        alphamax = 1.e5;					    # alpha upper bound
+        malpha = 3;                     	    # alphaBB1 memory
+        Valpha = alphamax * sp.ones((malpha,1));    # memory buffer for alpha
+        tau = 0.5;                      	    # alternating parameter
+        alpha = 0.5;                        
+    else:
+        alpha = 1.
+        
+    #controllare se va fatto    
+    X_low_bound = 1e-10;             	# Lower bound for the scaling matrix
+    X_upp_bound = 1e+10;             	# Upper bound for the scaling matrix
+
+    gamma = 1.e-04
+    beta = 0.4
+   
+    #computing fv 
+    def f(DU):
+        return ((X - DU)**2).sum()
+    #computing the gradient
+    def g(DU):
+        return sp.dot(-2*D.T, (X - DU))        
+    def _norma1(U):
+        return (sp.absolute(U)).sum()
+    
+    DU = sp.dot(D, U)
+    fv = f(DU)+reg_par*_norma1(U)
+    Gv = g(DU)
+    
+    S = sp.ones(U.shape)
+
+    if verbose:
+        E, full_out = _cost(X, U, D, None, pars)
+        print '   Energy = %.5e' % E
+    
+    #main loop
+    for i in xrange(maxiter):
+        fv_old = fv
+        if bbflag:
+            Valpha[0:malpha-2] = Valpha[1:malpha-1]
+        
+        Y = U - alpha*S*Gv
+        
+        Y = _st(Y, reg_par*alpha)     
+        
+        #projection on the convex set        
+        Y = sp.clip(Y, 0, sp.inf)
+        #Y = sp.absolute(Y)
+        # computes the norms
+        #n = sp.sqrt(sp.sum(Y**2, 0)).reshape((1, -1))
+        # projects onto the ball with specified radius 
+        #Y /= sp.where(n > 1., n, 1)
+        
+        ddir = Y - U
+        lam = 1.
+        
+        fcont = True
+        
+        ddirD = sp.dot(D, ddir)
+        
+        while fcont:
+            Uplus = U + lam*ddir
+            DU_try = DU + lam*ddirD
+            
+            fv = f(DU_try)+reg_par*_norma1(Uplus)
+            
+            if fv <= fv_old + gamma*lam*(Gv*ddir).sum() or lam < 1.e-04:
+                U = Uplus
+                DU = DU_try
+                Gtemp = g(DU)
+                if bbflag:
+                    Sk = lam*ddir
+                    Yk = Gtemp - Gv
+                Gv = Gtemp
+                fcont = False
+            else:
+                lam = beta*lam
+        #print lam
+        #S = NP.linalg.pinv(U).T
+        S = U
+        #S = sp.clip(S, -sp.inf, X_low_bound)
+        S = sp.clip(S, X_low_bound, X_upp_bound)
+        
+        #adaptive stepsize
+        if bbflag:
+            L = sp.ones(S.shape)
+            L /= S
+            Sk2 = Sk*L
+            Yk2 = Yk*S
+            bk = (Sk2*Yk).sum()
+            ck = (Yk2*Sk).sum()
+            if bk <= 0:
+                alpha1 = min(10*alpha, alphamax)
+            else:
+                alpha1BB = ((Sk2*Sk2).sum())/bk
+                alpha1 = min(alphamax, max(alphamin, alpha1BB))
+            if ck <= 0:
+                alpha2 = min(10*alpha, alphamax)
+            else:
+                alpha2BB = ck/(Yk2*Yk2).sum()
+                alpha2 = min(alphamax, max(alphamin, alpha2BB))
+            
+            Valpha[malpha-1] = alpha2
+            if alpha2/alpha1 <= tau:
+                alpha = Valpha.min()
+                tau = tau*0.9
+            else:
+                alpha = alpha1
+                tau = tau*1.1
+            #print alpha
+           
+        if verbose:
+            E, full_out = _cost(X, U, D, None, pars)
+            print '   Energy = %.5e' % E
+            
+        if sp.absolute(fv-fv_old)/sp.absolute(fv) < rtol:
+            break       
+    iters = i + 1
+    print 'somma U = %f iterazioni = %d' % (U.sum(), iters)
+    return U, iters
+
+
+#def learn(X, D0, C0, U0, _pars=dict(), callable=None):
+def learn(X, D0, C0, U0, callable=None, rtol_sgp=1.e-03, **kwargs):
+    '''
+    Runs the PADDLE algorithm.
+
+    The function takes as input the data matrix ``X``, the initial
+    values for the three unknowns, ``D0`` ``C0`` and ``U0``, and a dictionary
+    of parameters.
+
+    The optional parameters are passed as keyword arguments.
+
+    Parameters
+    ----------
+    X : (d, N) ndarray
+        Input data
+    D0 : (d, K) ndarray
+        The initial dictionary
+    C0 : (K, d) ndarray
+        The initial dual
+    U0 : (K, N) ndarray
+        The initial encodings
+    callable : function of type foo(D, C, U, X)
+        If not None, it gets called at each iteration and the result is
+        appended in an item of full_output
+    tau : float, optional
+          Weight of the sparsity penalty (default 0.1)
+    eta : float, optional
+          Weight of the coding error (default 1.0)
+    mu : float, optional
+          Weight of the l2 penalty on the coefficients (default 0.0)
+    maxiter : int, optional
+          Maximum number of outer iterations (default 10)
+    minused : integer, optional
+          Minimum number of times an atom as to be used (default 1)
+    verbose : bool, optional
+          Enables verbose output (default False)
+    rtol : float, optional
+          Relative tolerance checking convergence (default 1.e-4)
+    save_dict : bool, optional
+          If true, the dictionary is saved after each outer iteration (default False)
+    save_path : str, optional
+          The path in which to save the dictionary (relevant only if save_dict is True, default "./")
+    save_sorted : bool, optional
+          If true and if save_dict is also True, the atoms of dictionary are sorted wrt the usage in the sparse coding before being displayed and saved (default False)
+    save_shape: integer pair, optional
+          Numbers of (rows,cols) used to display the atoms of the dictionary (default (10,10))
+
+    Returns
+    -------
+
+    D : (d, K) ndarray
+        The final dictionary
+    C : (K, d) ndarray
+        The final dual
+    U : (K, N) ndarray
+        The final encodings
+    full_out : dict
+        Full output
+    '''
+    # start the timer
+    time0 = time.time()
+
+    # default parameters
+    pars = {
+        'maxiter': 10,
+        'minused': 1,
+        'tau_U'    : 0.5,
+        'tau_D'    : 0.0,
+        'eta'    : 1.0,
+        'mu'     : 0.0,
+        'Cbound' : 1.0,
+        'verbose': False,
+        'rtol'   : 1.e-4,
+        'rtol_sgp'   : 1.e-4,
+        'save_dict': False,
+        'save_path': './',
+        'save_sorted': False,
+        'save_shape': (10,10),
+        }
+    # check that all user-defined parameters are existing
+    for key in kwargs:
+        if key not in pars:
+            raise ValueError, "User-defined parameter '%s' is not known" % key
+        if key in pars:
+            # additional checks
+            if isinstance(pars[key], float):
+                # cast to float if required
+                kwargs[key] = float(kwargs[key])
+
+    # update the parameters with the user-defined values
+    pars.update(kwargs)
+
+    # DOES NOT make a copy of the init values
+    C, D, U = C0, D0, U0
+    d, N = X.shape
+    K = D.shape[1]
+
+    # the covariance matrix is used at each iteration
+    XXt = sp.dot(X, X.T)
+
+    # check the value of the cost function
+    E, full_out0 = _cost(X, U, D, C, pars)
+    print
+    print ' Initial energy = %.5e' % E
+
+    # calls the function if present
+    if callable != None:
+        call_res = [callable(D, C, U, X), ]
+
+    Ehist = [E,] # keeps track of the energy values
+    timing = []  # keeps track of the times
+    # start the optimization loop
+    for i in xrange(pars['maxiter']):
+
+        print '  iter %d ------------' % i
+
+        # possibly saves figures of the dictionary and its dual
+        if pars['save_dict']:
+            rows, cols = pars['save_shape']
+            # save the dictionary
+            _saveDict(D, U, rows, cols, path = pars['save_path']+'dictD_'+str(i), sorted = pars['save_sorted'])
+            # save the dual
+            _saveDict(C.T, U, rows, cols, path = pars['save_path']+'dictC_'+str(i), sorted = pars['save_sorted'])
+
+        # 1 ------- sparse coding step
+        print '  optimizing U'
+        start = time.time()
+        #U, full_out = _ist(X, U, D, C, pars, maxiter=1000)
+        U, iters = _sgp_U(D, X, U, pars, maxiter=1)
+        E, full_out = _cost(X, U, D, C, pars)
+        print '   Energy = %.5e' % E
+        timeA = time.time() - start
+
+        # checks the sparsity of the solution
+        used = sp.where(sp.absolute(U) > 0, 1, 0)
+        used_per_example = sp.sum(used, 0)
+        print '  %.1f / %d non-zero coefficients per example (on avg)' \
+            % (used_per_example.mean(), U.shape[0])
+
+        # check the coding and see if there are atoms not being
+        # used enough, or not being used at all
+        notused = sp.where(sp.sum(used, 1) < pars['minused'])[0]
+        if len(notused) > 0:
+            print '  %d atoms not used by at least %d examples' \
+                % (len(notused), pars['minused'])
+            U = _replaceAtoms(X, U, D, notused)
+
+        # 2 ------------ dictionary update
+
+        # pre-compute some matrix we need at this step
+        UUt = sp.dot(U, U.T)
+        XUt = sp.dot(X, U.T)
+
+        # optimization of the decoding matrix
+        print '  Optimizing D'
+        #print '   reconstruction error = %.2e' % full_out['rec_err']
+        start = time.time()
+        def _costD(Y):
+            return _cost_rec(Y, X, U)
+        f = 1./(N*d)
+        #D, iters = _pgd(D, f*XUt, f*UUt, _costD, verbose=pars['verbose'], rtol=pars['rtol'])
+        D, iters = _sgp_D(D, X, U, pars, maxiter=1)
+        E, full_out = _cost(X, U, D, C, pars)
+        print '   Energy = %.5e' % E
+        timeB = time.time() - start
+        # check the value of the cost function
+        E, full_out = _cost(X, U, D, C, pars)
+        print '   final reconstruction error = %.2e' % full_out['rec_err']
+        #print '   energy after %d iter. = %.5e' % (iters+1, E)
+
+        if pars['eta'] > 0:
+
+            # optimization of the coding matrix
+            print '  Optimizing C'
+            print '   coding error = %.2e' % full_out['cod_err']
+            start = time.time()
+            def _costC(Y):
+                return _cost_cod(Y, X, U, pars)
+            f = pars['eta']/(N*K)
+            C, iters = _pgd(C, f*XUt.T, f*XXt, _costC, axis=1, bound=pars['Cbound'], verbose=pars['verbose'], rtol=pars['rtol'])
+            timeC = time.time() - start
+            # check the value of the cost function
+            E, full_out = _cost(X, U, D, C, pars)
+            print '   final coding error = %.2e' % full_out['cod_err']
+            #print '   energy after %d iter. = %.5e' % (iters+1, E)
+        else:
+            timeC = 0
+
+        # 3 ------------- stopping condition
+        if callable != None:
+            call_res.append(callable(D, C, U, X))
+
+        Em = sp.mean(Ehist[-min(len(Ehist), 3):])
+        if abs(E-Em)/Em < 10.*pars['rtol']:
+            break
+        Ehist.append(E)
+        full_out0 = full_out
+        timing.append((timeA, timeB, timeC))
+
+    # collect and print some final stats
+    print '  final --------------' 
+    used = sp.where(sp.absolute(U) > 0, 1, 0)
+    l0 = used.flatten().sum()
+    print '  %d / %d non-zero coefficients' % (l0, U.size)
+    print '  average atom usage = %.1f' % sp.sum(used, 1).mean()
+    timing.append(time.time() - time0)
+    full_out['time'] = timing
+    if callable != None:
+        full_out['call_res'] = call_res
+
+    return D, C, U, full_out
+
+def init(X, K, det=False, rnd=False):
+    '''
+    Initializes the variables.
+
+    Initializes the matrices ``D``, ``C`` and ``U`` from the data matrix
+    ``X``.
+    The dimension of the dictionary is ``K``.
+    If ``det`` is True the first ``K`` columns of ``X`` are chosen as
+    atoms (deterministic initialization), otherwise they are picked 
+    randomly.
+    The atoms are normalized to one.
+    The matrix ``U`` is chosen as to minimize the reconstruction error.
+    The matrix ``C`` is chosen as the pseudo-inverse of ``D``, with
+    rows normalized to one.
+
+    Parameters
+    ----------
+    X : (d, N) ndarray
+        Input data
+    K : integer
+        Size of the dictionary
+    det : bool
+        If True, the choice of atoms is deterministic
+    rnd : bool
+        If True, the atoms are not sampled from the examples, but have random values
+    
+    Returns
+    -------
+    D0 : (d, K) ndarray
+        The initial dictionary
+    C0 : (K, d) ndarray
+        The initial dual
+    U0 : (K, N) ndarray
+        The initial encodings
+    '''
+    d, N = X.shape
+    # D is the decoding matrix
+    # if rnd is True, we chose random atoms
+    if rnd:
+        D0 = sp.random.rand(d, K)
+    # otherwise, it is initialized by choosing a random sample of
+    # non-zero examples
+    else:
+        nonzero = sp.where(sp.sum(X**2, 0) > 0)[0]
+        if det:
+            sample = nonzero[:K]
+        else:
+            sample = sp.random.permutation(len(nonzero))[:K]
+            sample = nonzero[sample]
+        D0 = X[:, sample]
+        D0 = sp.clip(D0, 0, sp.inf)
+    # the atoms are normalized
+    D0 /= sp.sqrt(sp.sum(D0**2, 0)).reshape((1, -1))
+    # the coefficients are initialized with the optimal ones
+    # in an l2-sense
+    pinv = la.pinv(D0)
+    U0 = sp.dot(pinv, X)
+    # C is the coding matrix
+    # it is initialized with the pseudoinverse of D, but 
+    # after normalizing the rows
+    C0 = pinv/sp.sqrt(sp.sum(pinv**2, 1)).reshape((-1, 1))
+    return D0, C0, U0
+
+
+
+
+def _create_dataset(traindir, N):
+    datafn = os.path.join(traindir, 'allimages.npz')
+    if not os.access(datafn, os.R_OK):
+        W = 19
+        # list of training images
+        print os.path.join(traindir, '*.pgm')
+        trainlist = glob.glob(os.path.join(traindir, '*.pgm'))
+        # number of training images (should be 200)
+        Nfiles = len(trainlist)
+        patches = []
+        for fn in trainlist:
+            #print ' ...', os.path.basename(fn)
+            # load the images
+            img = sp.misc.imread(fn).astype(sp.float32)
+            #assert img.ndim == 3, img.ndim
+            #assert img.shape[2] == 3, img.shape
+            # convert to gray scale
+            #img = sp.mean(img, 2)
+            # recenter
+            #img -= img.flatten().mean()
+            # normalize
+            img /= 255.
+            # pick random positions for upper left corner
+            # create an array with the positions of all pixels in the pacthes        
+            p = img.reshape(W*W,1)
+            assert p.shape == (W*W,1), p.shape
+            # append to the list
+            patches.append((p).T)
+        # build matrix
+        patches = sp.concatenate(patches, 0).T
+        assert patches.shape == (W*W, Nfiles), patches.shape
+        sp.savez(datafn, patches=patches)
+    else:
+        npz = sp.load(datafn)
+        patches = npz['patches']
+    Nfiles = patches.shape[1]
+    print 'number of samples = %d, used samples = %d ' % (Nfiles, min(Nfiles, N))
+    if N < Nfiles:
+        subset = sp.random.permutation(Nfiles)[:N]
+        patches = patches[:, subset]
+    return patches
+    
+    
+def _saveRep(DU, X, Nrows = 8, Ncols = 25, path = './savedRep.png'):
+    '''
+    Saves a figure of the reconstructions.
+
+    Creates a table with ``Nrows x Ncols`` images of ``DU``,
+    drawn as square image patches.
+    It assumes that the dimension ``du`` of the atoms is a perfect square.
+
+    Parameters
+    ----------
+    DU : (d, N) ndarray
+        Dictionary*Representations
+    X  : (d, N) ndarray 
+        data matrix
+    Nrows : integer
+        Number of rows in the figure
+    Ncols : integer
+        Number of columns in the figure
+    path : string
+        Name of the file where the figure will be saved
+  
+    '''
+    # display some of the encoder/decoder pairs
+    d = DU.shape[0]
+    W = NP.sqrt(d) # image size
+    
+    assert Nrows*Ncols <= DU.shape[1]
+    
+    subset = NP.arange(0,Nrows*Ncols)
+    print 'DU.shape = (%d %d), X.shape = (%d %d)' % (DU.shape[0], DU.shape[1], X.shape[0], X.shape[1])
+    # trick for visualization
+    DU = DU * NP.sign(NP.mean(DU, 0)).reshape((1, -1))
+    X = X * NP.sign(NP.mean(X, 0)).reshape((1, -1))
+    
+    # build an image with all atoms
+    m = 2 # margin around the atoms
+    imgDU = NP.ones((W*Nrows+m*(Nrows+1), W*Ncols+m*(Ncols+1)))
+    vminDU = stats.scoreatpercentile(DU.flatten(), 2)
+    vmaxDU = stats.scoreatpercentile(DU.flatten(), 98)
+    imgDU *= vmaxDU
+    for i in xrange(0, Ncols-1, 2):
+        for j in xrange(Nrows):
+            k = i*Nrows+j # atom index
+            if k == len(subset):
+                break
+            y, x = j*(W+m)+m, i*(W+m)+m # coordinates of the top-left corner
+            imgDU[y:y+W,x:x+W] = DU[:,subset[k]].reshape((W,W))
+            
+            x1 = (i+1)*(W+m)+m # coordinates of the top-left corner
+            imgDU[y:y+W,x1:x1+W] = X[:,subset[k]].reshape((W,W))
+            
+        if k == len(subset):
+            break
+    dpi = 50.
+    pylab.figure(figsize=(imgDU.shape[1]/dpi, imgDU.shape[0]/dpi), dpi=dpi)
+    pylab.imshow(imgDU, interpolation='nearest', vmin=vminDU, vmax=vmaxDU)
+    pylab.gray()
+    pylab.xticks(())
+    pylab.yticks(())
+    pylab.savefig(path, dpi=300, bbox_inches='tight', transparent=True)
+    return None
+    
+
+
+if __name__=='__main__':
+
+    N = 600 # number of data
+    k = 3   # number of relevant atoms for each datum
+    d = 19*19  # dimension of the data
+    K = d/2#370  # dimension of the dictionary
+
+    ############ synthetic experiment
+    
+    # generating dictionary, all atoms are centered on 0
+    # and with 2-norm one
+    #D_true = ra.uniform(0, 1, size=(d, K)).astype(sp.float32)
+    #D_true -= sp.mean(D_true, 0) 
+    #D_true /= sp.sqrt(sp.sum(D_true**2, 0)).reshape((1, -1))
+    #assert sp.allclose(sp.mean(D_true, 0), 0, atol=1.e-7), sp.mean(D_true, 0)
+
+    # generating coefficients
+    #U_true = sp.zeros((K, N), sp.float32)
+    #for i in xrange(N):
+    #    U_true[ra.permutation(K)[:k],i] = ra.uniform(0, 1, size=(k,))
+    #assert sp.all(sp.sum(sp.where(sp.absolute(U_true) > 0, 1, 0), 0) == k)
+    #m = sp.mean(U_true, 0)
+    #U_true -= m.reshape((1, -1))
+    #assert sp.all(sp.absolute(sp.mean(U_true, 0)) < 1.e-6)
+
+    # generate data
+    #X = sp.dot(D_true, U_true)
+    #assert X.shape == (d, N)
+    #assert sp.all(sp.absolute(sp.mean(X, 0)) < 1.e-6), sp.mean(X, 0)
+    #assert sp.allclose(sp.mean(X, 0), 0, atol=1.e-7), sp.mean(X, 0)
+
+    # add some Gaussian noise
+    #noise = ra.normal(0, 0.007, size=(d, N))
+    #SNR = la.norm(X) / la.norm(noise)
+    #print 'SNR (dB) = %d' % (20*sp.log10(SNR),)
+    #X += noise
+    #X = sp.clip(X, 0, sp.inf)
+    
+    ############## real data
+    
+    X = _create_dataset('/home/sigmawg/data/faces/cbcl_faces/test/face/', N)
+    N = X.shape[1]
+    # add some Gaussian noise
+    #noise = ra.normal(0, 0.04, size=(d, N))
+    #SNR = la.norm(X) / la.norm(noise)
+    #print 'SNR (dB) = %d' % (20*sp.log10(SNR),)
+    #X += noise
+    #X = sp.clip(X, 0, sp.inf)
+    
+        
+    nrows = 7
+    sorted = False
+    rtol_sgp = 1.e-05
+    tau_D = 3.0
+    tau_U = 0.01
+    
+    print 'X.max() = %f, X.min() = %f' % (X.max(), X.min())
+    D0, C0, U0 = init(X, K, rnd=False)
+    _saveDict(D0, U0, Nrows = nrows, Ncols = 25, path = './savedRDict_init.png', sorted = sorted)
+    U0 = sp.clip(U0, 0, sp.inf)
+    D, C, U, full_out = learn(X, D0, C0, U0, tau_U=tau_U, tau_D=tau_D, mu=1.e-8, eta=0., maxiter=200, minused=1, verbose=False, rtol_sgp=rtol_sgp)
+
+    print 'Nof negative D elements = %d / %d' % (sp.where(D < 0, 1, 0).sum(), K*d)
+    print 'Nof negative U elements = %d / %d' % (sp.where(U < 0, 1, 0).sum(), K*N)
+
+    _saveDict(D, U, Nrows = nrows, Ncols = 25, path = './savedDict.png', sorted = sorted)
+    _saveRep(sp.dot(D, U), X, Nrows = nrows, Ncols = 25, path = './savedRep.png')
+    
+    #spars = (1/(sp.sqrt(d)-1))*(sp.sqrt(d)-(sp.sum(sp.absolute(U), 0)/sp.sqrt(sp.sum(U**2, 0))))
+    print D.max(), U.max()
+    print 'sparseness of U is: ', sp.mean(sparsity(U, axis=0))
+    print 'sparseness of D is: ', sp.mean(sparsity(D, axis=0))
+
+    #print 'inizio test di convergenza'
+    #X = sp.dot(D, U)
+    #D_old = D[:]
+    #U_old = U[:]
+    #D = sp.clip(0.001 * sp.random.normal(size=D.shape) + D, 0, sp.inf)
+    #U = sp.clip(0.001 * sp.random.normal(size=U.shape) + U, 0, sp.inf)
+    #D, C, U, full_out = learn(X, D, C0, U, tau_U=tau_U, tau_D=tau_D, mu=1.e-8, eta=0., maxiter=200, minused=1, rtol_sgp=rtol_sgp)
+    #_saveDict(D, U, Nrows = nrows, Ncols = 25, path = './savedDict_test.png', sorted = sorted)
+    #_saveRep(sp.dot(D, U), X, Nrows = nrows, Ncols = 25, path = './savedRep_test.png')
+    #print 'sparseness of U test is: ', sp.mean(sparsity(U, axis=0))
+    #print 'sparseness of D test is: ', sp.mean(sparsity(D, axis=0))
+    
+    #print 'error on D = ', ((D_old-D)**2).sum()/(D_old**2).sum()
+    #print 'error on U = ', ((U_old-U)**2).sum()/(U_old**2).sum()
+    
+    #print 'Nof negative D elements = %d / %d' % (sp.where(D_old < 0, 1, 0).sum(), K*d)
+    #print 'Nof negative U elements = %d / %d' % (sp.where(U_old < 0, 1, 0).sum(), K*N)
+    
+    sys.exit(0)
+
+    # comparison wih true dictionary
+    print
+    print sp.sum(D**2, 0).mean()
+    D /= sp.sqrt(sp.sum(D**2, 0)).reshape((1, -1))
+    print sp.sum(D**2, 0).mean()
+    print sp.sum(D_true**2, 0).mean()
+    d2 = sp.sum((D[:,:,sp.newaxis] - D_true[:,sp.newaxis,:])**2, 0)
+    closest = sp.argmin(d2, 0)
+    dist = 1-sp.absolute(sp.sum(D[:,closest] * D_true, 0))
+    print dist
+    print sp.where(dist < 0.01)
+    print len(sp.where(dist < 0.01)[0])
+    
