@@ -1,0 +1,7 @@
+from setuptools import setup, find_packages
+
+setup(name='django-test',
+      version='0.1006dev',
+      packages=find_packages(),
+      license='GPL',
+      long_description="Awesome replacement for django test runner")
