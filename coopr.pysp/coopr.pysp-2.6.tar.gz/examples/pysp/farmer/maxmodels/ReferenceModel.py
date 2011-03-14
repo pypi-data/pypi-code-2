@@ -1,0 +1,103 @@
+#
+# Imports
+#
+
+from coopr.pyomo import *
+
+#
+# Model
+#
+
+model = AbstractModel()
+
+#
+# Parameters
+#
+
+model.CROPS = Set()
+
+model.TOTAL_ACREAGE = Param(within=PositiveReals)
+
+model.PriceQuota = Param(model.CROPS, within=PositiveReals)
+
+model.SubQuotaSellingPrice = Param(model.CROPS, within=PositiveReals)
+
+def super_quota_selling_price_validate (value, i, model):
+    return model.SubQuotaSellingPrice[i] >= model.SuperQuotaSellingPrice[i]
+
+model.SuperQuotaSellingPrice = Param(model.CROPS, validate=super_quota_selling_price_validate)
+
+model.CattleFeedRequirement = Param(model.CROPS, within=NonNegativeReals)
+
+model.PurchasePrice = Param(model.CROPS, within=PositiveReals)
+
+model.PlantingCostPerAcre = Param(model.CROPS, within=PositiveReals)
+
+model.Yield = Param(model.CROPS, within=NonNegativeReals)
+
+#
+# Variables
+#
+
+model.DevotedAcreage = Var(model.CROPS, bounds=(0.0, model.TOTAL_ACREAGE))
+
+model.QuantitySubQuotaSold = Var(model.CROPS, bounds=(0.0, model.TOTAL_ACREAGE))
+model.QuantitySuperQuotaSold = Var(model.CROPS, bounds=(0.0, model.TOTAL_ACREAGE))
+
+model.QuantityPurchased = Var(model.CROPS, bounds=(0.0, None))
+
+# TBD: Change when domain bound are propagated through to output in the following three variables (remove bounds, add domains).
+model.QuantityPurchased = Var(model.CROPS, bounds=(0.0, None))
+
+model.FirstStageCost = Var()
+model.SecondStageCost = Var()
+
+#
+# Constraints
+#
+
+def total_acreage_rule(model):
+    return summation(model.DevotedAcreage) <= model.TOTAL_ACREAGE
+
+model.ConstrainTotalAcreage = Constraint(rule=total_acreage_rule)
+
+def cattle_feed_rule(i, model):
+    return model.CattleFeedRequirement[i] <= (model.Yield[i] * model.DevotedAcreage[i]) + model.QuantityPurchased[i] - model.QuantitySubQuotaSold[i] - model.QuantitySuperQuotaSold[i]    
+
+model.EnforceCattleFeedRequirement = Constraint(model.CROPS, rule=cattle_feed_rule)
+
+def limit_amount_sold_rule(i, model):
+    return model.QuantitySubQuotaSold[i] + model.QuantitySuperQuotaSold[i] - (model.Yield[i] * model.DevotedAcreage[i]) <= 0.0
+
+model.LimitAmountSold = Constraint(model.CROPS, rule=limit_amount_sold_rule)
+
+def enforce_quotas_rule(i, model):
+    return (0.0, model.QuantitySubQuotaSold[i], model.PriceQuota[i])    
+
+model.EnforceQuotas = Constraint(model.CROPS, rule=enforce_quotas_rule)
+
+#
+# Stage-specific cost computations
+#
+
+def first_stage_cost_rule(model):
+   return (model.FirstStageCost - summation(model.PlantingCostPerAcre, model.DevotedAcreage)) == 0.0
+
+model.ComputeFirstStageCost = Constraint(rule=first_stage_cost_rule)
+
+def second_stage_cost_rule(model):
+   expr = summation(model.PurchasePrice, model.QuantityPurchased)
+   expr -= summation(model.SubQuotaSellingPrice, model.QuantitySubQuotaSold)
+   expr -= summation(model.SuperQuotaSellingPrice, model.QuantitySuperQuotaSold)
+   return (model.SecondStageCost - expr) == 0.0
+
+model.ComputeSecondStageCost = Constraint(rule=second_stage_cost_rule)
+
+#
+# Objective
+#
+
+def total_cost_rule(model):
+    return -(model.FirstStageCost + model.SecondStageCost)
+
+model.Total_Cost_Objective = Objective(rule=total_cost_rule, sense=maximize)
