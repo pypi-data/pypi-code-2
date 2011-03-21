@@ -1,0 +1,20 @@
+import os
+def stacksize(fstack):
+    return fstack.f_code.co_stacksize
+def fname(fstack):
+    return fstack.f_code.co_name
+def filename(fstack):
+    return fstack.f_code.co_filename
+def lineno(fstack):
+    return fstack.f_lineno
+from datetime import datetime
+def strtime(fstack):
+    return datetime.now().isoformat()
+def pid(fstack):
+    return str(os.getpid())
+def thread_name(fstack):
+    import threading
+    return threading.currentThread().getName()
+def thread_ident(fstack):
+    import threading
+    return threading.currentThread().ident
