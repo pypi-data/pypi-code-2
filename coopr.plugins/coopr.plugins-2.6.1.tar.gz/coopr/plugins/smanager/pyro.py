@@ -1,0 +1,125 @@
+#  _________________________________________________________________________
+#
+#  Coopr: A COmmon Optimization Python Repository
+#  Copyright (c) 2008 Sandia Corporation.
+#  This software is distributed under the BSD License.
+#  Under the terms of Contract DE-AC04-94AL85000 with Sandia Corporation,
+#  the U.S. Government retains certain rights in this software.
+#  For more information, see the Coopr README.txt file.
+#  _________________________________________________________________________
+
+
+__all__ = []
+
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+
+try:
+    import Pyro.core
+    import pyutilib.pyro
+    using_pyro=True
+except ImportError:
+    using_pyro=False
+
+import pyutilib.misc
+import pyutilib.component.core
+from coopr.opt.parallel.manager import *
+from coopr.opt.parallel.solver import *
+from coopr.opt.results import SolverResults
+
+
+class SolverManager_Pyro(AsynchronousSolverManager):
+
+    pyutilib.component.core.alias('pyro')
+
+    def clear(self):
+        """
+        Clear manager state
+        """
+        AsynchronousSolverManager.clear(self)
+        self.client = pyutilib.pyro.Client()
+        self._opt = None
+        self._ah = {}
+
+    def _perform_queue(self, ah, *args, **kwds):
+        """
+        Perform the queue operation.  This method returns the ActionHandle,
+        and the ActionHandle status indicates whether the queue was successful.
+        """
+        
+        if 'opt' in kwds:
+            self._opt = kwds['opt']
+            del kwds['opt']
+        else:
+            raise ActionManagerError, "No solver passed to SolverManager_Pyro, method=_perform_queue; use keyword option \"opt\""
+
+        #
+        # Force coopr.opt to ignore tests for availability, at least locally
+        #
+        kwds['available'] = True
+        self._opt._presolve(*args, **kwds)
+        problem_file_string = open(self._opt._problem_files[0],'r').read()
+
+        #
+        # Delete this option, to ensure that the remote worker does the check for
+        # availability.
+        #
+        del kwds['available']
+
+        #
+        # We can't pickl the options object itself - so extract a simple
+        # dictionary of solver options and re-construct it on the other end.
+        #
+        solver_options = {}
+        for key in self._opt.options:
+           solver_options[key]=self._opt.options[key]
+
+        # pick up the warm-start file, if available.
+        warm_start_file_string = None
+        warm_start_file_name = None
+        if hasattr(self._opt,  "warm_start_solve"):
+           if (self._opt.warm_start_solve is True) and (self._opt.warm_start_file_name is not None):
+              warm_start_file_name = self._opt.warm_start_file_name
+              warm_start_file_string = open(warm_start_file_name, 'r').read()
+
+        #
+        # Pickl everything into one big data object via the "Bunch" command
+        # and post the task!
+        #
+        data=pyutilib.misc.Bunch(opt=self._opt.type, \
+                                 file=problem_file_string, filename=self._opt._problem_files[0], \
+                                 warmstart_file=warm_start_file_string, warmstart_filename=warm_start_file_name, \
+                                 kwds=kwds, solver_options=solver_options, suffixes=self._opt.suffixes, symbol_map=self._opt._symbol_map)
+        task = pyutilib.pyro.Task(data=data, id=ah.id)
+        self.client.add_task(task)
+        self._ah[task.id] = ah
+        
+        return ah
+
+    def _perform_wait_any(self):
+        """
+        Perform the wait_any operation.  This method returns an
+        ActionHandle with the results of waiting.  If None is returned
+        then the ActionManager assumes that it can call this method again.
+        Note that an ActionHandle can be returned with a dummy value,
+        to indicate an error.
+        """
+        if self.client.num_results() > 0:
+            # this protects us against the case where we get an action
+            # handle that we didn't know about or expect.
+            while(True):
+               task = self.client.get_result()
+               if task.id in self._ah:
+                  ah = self._ah[task.id]
+                  self._ah[task.id] = None
+                  ah.status = ActionStatus.done
+                  #print "HERE",ah.id, task.result
+                  self.results[ah.id] = pickle.loads(task.result)
+                  #self.results[ah.id].write()
+                  return ah
+
+if not using_pyro:
+    SolverManagerFactory.deactivate('pyro')
+
