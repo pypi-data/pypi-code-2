@@ -1,0 +1,1 @@
+AddMemberProfile = 'betahaus.memberprofile: Add MemberProfile'
