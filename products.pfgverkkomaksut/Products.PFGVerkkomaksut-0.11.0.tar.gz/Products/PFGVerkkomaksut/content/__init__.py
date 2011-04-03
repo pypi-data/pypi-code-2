@@ -1,0 +1,1 @@
+from formVerkkomaksutAdapter import PFGVerkkomaksut
