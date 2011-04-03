@@ -1,0 +1,3 @@
+"""Fail plugin"""
+
+raise NotImplementedError
