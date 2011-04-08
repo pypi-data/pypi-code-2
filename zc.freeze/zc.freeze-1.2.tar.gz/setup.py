@@ -1,0 +1,74 @@
+"""Pattern for freezing objects"""
+
+import os
+from setuptools import setup, find_packages
+
+
+def read(*rnames):
+    return open(os.path.join(os.path.dirname(__file__), *rnames)).read()
+
+
+tests_require = [
+    'transaction',
+    'zope.app.container', # lame, should remove
+    'zope.app.keyreference',
+    'zope.app.testing', # lame, should remove
+    'zope.testing',
+    ],
+
+
+setup(
+    name="zc.freeze",
+    version="1.2",
+    author='Zope Project',
+    author_email='zope-dev@zope.org',
+    description=__doc__,
+    long_description='\n\n'.join([
+        read('README.txt'),
+        '.. contents::',
+        '\n'.join([
+            'Detailed Documentation',
+            '**********************',
+            ]),
+        read('src', 'zc', 'freeze', 'README.txt'),
+        read('CHANGES.txt'),
+        ]),
+    license='ZPL 2.1',
+    keywords="Zope Zope3 version freeze",
+    classifiers=[
+        'Development Status :: 5 - Production/Stable',
+        'Environment :: Web Environment',
+        'Framework :: Zope3',
+        'Intended Audience :: Developers',
+        'License :: OSI Approved :: Zope Public License',
+        'Natural Language :: English',
+        'Operating System :: OS Independent',
+        'Programming Language :: Python',
+        'Topic :: Internet :: WWW/HTTP',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        ],
+    url='http://pypi.python.org/pypi/zc.freeze',
+    packages=find_packages('src'),
+    package_dir={'': 'src'},
+    namespace_packages=['zc'],
+    include_package_data=True,
+    zip_safe=False,
+    install_requires=[
+        'pytz',
+        'rwproperty',
+        'setuptools',
+        'zc.copy >= 1.1b',
+        'ZODB3',
+        'zope.annotation',
+        'zope.cachedescriptors',
+        'zope.component',
+        'zope.event',
+        'zope.interface',
+        'zope.locking >= 1.2.1', # optional, actually <= wish? not reality
+        ],
+    extras_require=dict(
+        test=tests_require,
+        ),
+    tests_require=tests_require,
+    test_suite='zc.freeze.tests.test_suite',
+    )
