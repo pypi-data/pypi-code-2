@@ -1,0 +1,5 @@
+version = "1.0.8"
+author = "Kevin Dangoor"
+email = "dangoor+turbogears@gmail.com"
+copyright = "Copyright 2005-2008 Kevin Dangoor and contributors"
+license = "MIT"
