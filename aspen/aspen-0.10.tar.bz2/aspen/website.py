@@ -1,0 +1,193 @@
+import datetime
+import logging
+import os
+import re
+import sys
+import traceback
+import urlparse
+from os.path import join, isfile
+
+from aspen import http, gauntlet, simplates
+from aspen.http.request import Request
+from aspen.http.response import Response
+from aspen.configuration import Configurable
+
+
+log = logging.getLogger('aspen.website')
+
+
+class Website(Configurable):
+    """Represent a website.
+    """
+
+    def __init__(self, argv=None):
+        """Takes an argv list, without the initial executable name.
+        """
+        self.configure(argv)
+        log.warn("Aspen website loaded from %s." % self.root)
+        self.run_hook('startup')
+    
+    def __call__(self, environ, start_response):
+        """WSGI interface.
+        """
+        request = Request.from_wsgi(environ) # too big to fail :-/
+        response = self.handle(request)
+        return response(environ, start_response)
+
+    def shutdown(self):
+        log.warn("Shutting down Aspen website.")
+        self.run_hook('shutdown')
+
+    def run_hook(self, name):
+        self.hooks.run(name, self)
+
+    def handle(self, request):
+        """Given an Aspen request, return an Aspen response.
+        """
+        try:
+            try:
+                self.copy_configuration_to(request)
+                request.website = self
+                self.hooks.run('inbound_early', request)
+                request.fs = self.translate(request)
+                self.hooks.run('inbound_late', request)
+                response = simplates.handle(request)
+            except:
+                response = self.handle_error_nicely(request)
+        except Response, response:
+            # Grab the response object in the case where it was raised.  In the
+            # case where it was returned from simplates.handle, response is set
+            # in a try block above.
+            pass
+        else:
+            # If the response object is coming from handle_error via except 
+            # Response, then it already has request on it and the early hooks
+            # have already been run. If it fell off the edge un-exceptionally,
+            # we need to take care of those two things.
+            response.request = request
+            self.hooks.run('outbound_early', response)
+
+        self.hooks.run('outbound_late', response)
+        response.headers.set('Content-Length', len(response.body))
+        self.log_access(request, response) # TODO is this at the right level?
+        return response
+
+    def handle_error_nicely(self, request):
+        """Try to provide some nice error handling.
+        """
+        try:                        # nice error messages
+            tb_1 = traceback.format_exc()
+            response = sys.exc_info()[1]
+            if not isinstance(response, Response):
+                log.error(tb_1)
+                response = Response(500, tb_1)
+            response.request = request
+            self.hooks.run('outbound_early', response)
+            fs = self.ours_or_theirs(str(response.code) + '.html')
+            if fs is None:
+                fs = self.ours_or_theirs('error.html')
+            if fs is None:
+                raise
+            request.fs = fs
+            response = simplates.handle(request, response)
+            return response
+        except Response, response:  # no nice error template available
+            raise
+        except:                     # last chance for tracebacks in the browser
+            tb_2 = traceback.format_exc().strip()
+            tbs = '\n\n'.join([tb_2, "... while handling ...", tb_1])
+            log.error(tbs)
+            if self.show_tracebacks:
+                response = Response(500, tbs)
+            else:
+                response = Response(500)
+            response.request = request
+            raise response
+
+    def find_ours(self, filename):
+        """Given a filename, return a filepath.
+        """
+        return join(os.path.dirname(__file__), 'www', filename)
+
+    def ours_or_theirs(self, filename):
+        """Given a filename, return a filepath or None.
+        """
+        ours = self.find_ours(filename)
+        theirs = join(self.root, '.aspen', filename)
+        if isfile(theirs):
+            out = theirs
+        elif isfile(ours):
+            out = ours
+        else:
+            out = None
+        return out
+
+    def translate(self, request):
+        """Given a Request, return a filesystem path, or raise Response.
+        """
+       
+        # First step.
+        # ===========
+        # Set request.fs initially, return a list of fspath parts.
+
+        parts = gauntlet.translate(request)
+        log.debug("got request for " + request.fs)
+
+
+        # The Gauntlet
+        # ============
+        # Keep request.fs up to date for logging purposes. It is used in
+        # log_access, below, which could be triggered by any of the raises
+        # herein. Each of these sets request.fs, and returns None or raises.
+
+        gauntlet.check_sanity(request)
+        gauntlet.hidden_files(request)
+        gauntlet.virtual_paths(request, parts)
+        gauntlet.trailing_slash(request)
+        gauntlet.index(request)
+        gauntlet.autoindex( request
+                          , self.conf.aspen.no('list_directories')
+                          , self.ours_or_theirs('autoindex.html')
+                           )
+        gauntlet.socket_files(request)
+        gauntlet.not_found(request, self.find_ours('favicon.ico'))
+
+        
+        # Now you are one of us.
+        # ======================
+
+        return request.fs
+
+    def log_access(self, request, response):
+        """Log access.
+        """
+
+        # What was the URL path translated to?
+        # ====================================
+
+        fs = request.fs[len(self.root):]
+        if fs:
+            fs = '.'+fs
+        else:
+            fs = request.fs
+        log.info("%s => %s" % (request.path.raw, fs))
+
+
+        # Where was response raised from?
+        # ===============================
+
+        tb = sys.exc_info()[2]
+        if tb is None:
+            log.info("%33s" % '<%s>' % response)
+        else:
+            while tb.tb_next is not None:
+                tb = tb.tb_next
+            frame = tb.tb_frame
+            co = tb.tb_frame.f_code
+            filename = tb.tb_frame.f_code.co_filename
+            if filename.startswith(self.root):
+                filename = '.'+filename[len(self.root):]
+            log.info("%33s  %s:%d" % ( '<%s>' % response
+                                     , filename
+                                     , frame.f_lineno
+                                      ))
