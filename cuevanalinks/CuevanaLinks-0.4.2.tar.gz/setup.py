@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+try:
+    from setuptools import setup
+except ImportError:
+    import distribute_setup
+    distribute_setup.use_setuptools()
+    from setuptools import setup
+
+import sys
+from cuevanalinks import __version__
+
+if sys.version_info < (2, 6):
+    print('ERROR: cuevanalinks requires at least Python 2.6 to run.')
+    sys.exit(1)
+
+long_description = open('README.rst').read()
+
+setup(
+    name = 'CuevanaLinks',
+    version = __version__,
+    description = 'A program to retrieve movies and series (or its links)\
+                    from cuevana.tv',
+    long_description = long_description, 
+    author = u'Martín Gaitán'.encode("UTF-8"),
+    author_email = 'gaitan@gmail.com',
+    url='https://bitbucket.org/tin_nqn/cuevanalinks',
+    packages = ['cuevanalinks',],
+    license = 'GNU GENERAL PUBLIC LICENCE v3.0 (see LICENCE.txt)',
+    scripts = ['bin/cuevanalinks'],
+    install_requires = ['pyquery>=0.5', 'plac>=0.8', 'progressbar'],
+    classifiers = [
+        'Development Status :: 4 - Beta',
+        'Environment :: Console',
+        'Intended Audience :: End Users/Desktop',
+        'License :: OSI Approved :: GNU General Public License (GPL)',
+        'Natural Language :: English',
+        'Operating System :: OS Independent',
+        'Programming Language :: Python',
+        'Topic :: Internet :: WWW/HTTP :: Dynamic Content',
+      ],
+
+)
