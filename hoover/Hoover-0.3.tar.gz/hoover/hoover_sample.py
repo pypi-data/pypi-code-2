@@ -1,0 +1,17 @@
+import hoover
+import hoover.utils
+import logging
+from time import sleep
+
+hoover.authorize('hoovertest', 'hoover', 'b34v3r5')
+i = hoover.utils.get_input_by_name('sysloginput2')
+handler = i.get_handler()
+logger = logging.getLogger('syslogtologgly')
+logger.addHandler(handler)
+handler.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)
+logger.info('this will go straight to loggly')
+
+sleep(60)
+
+print i.search(starttime='NOW-2MINUTES')
