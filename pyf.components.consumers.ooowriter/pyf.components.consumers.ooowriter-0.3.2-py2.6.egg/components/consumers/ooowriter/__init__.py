@@ -1,0 +1,1 @@
+from pyf.components.consumers.ooowriter.writer import OOoWriter
