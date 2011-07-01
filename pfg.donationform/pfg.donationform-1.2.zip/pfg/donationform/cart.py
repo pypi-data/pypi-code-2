@@ -1,0 +1,63 @@
+from zope.event import notify
+from zope.component import adapts, getUtility
+from zope.interface import implements, alsoProvides
+from getpaid.core.interfaces import ILineItemFactory, IShoppingCart
+from getpaid.core.item import PayableLineItem, RecurringLineItem
+from pfg.donationform.interfaces import IDonationFieldSet, DonationCreatedEvent, IDonationCart
+from zope.app.intid.interfaces import IIntIds
+from Products.CMFPlone.utils import safe_unicode
+
+try:
+    from Products.PloneGetPaid import sessions
+    sessions
+except ImportError:
+    sessions = None
+
+
+class DonationFieldLineItemFactory(object):
+    implements(ILineItemFactory)
+    adapts(IShoppingCart, IDonationFieldSet)
+    
+    def __init__(self, cart, field):
+        self.cart = cart
+        self.field = field
+        
+        form = field.REQUEST.form
+        fname = self.field.getId()
+        self.amount = form.get(fname + '_level')
+        if not self.amount:
+            self.amount = form.get(fname + '_amount', '0')
+        self.amount = self.amount.lstrip('$')
+        self.is_recurring = form.get(fname + '_recurring', False)
+        self.occurrences = form.get(fname + '_occurrences', 9999)
+
+    def create(self):
+
+        pfg = self.field.aq_parent
+        
+        if self.is_recurring:
+            item = RecurringLineItem()
+            item.interval = 1
+            item.unit = 'months'
+            item.total_occurrences = self.occurrences
+        else:
+            item = PayableLineItem()
+        item.item_id = self.field.UID()
+        item.uid = getUtility(IIntIds).register(self.field)
+        item.name = safe_unicode(pfg.Title())
+        item.cost = float(self.amount)
+        item.quantity = 1
+        
+        if item.item_id in self.cart:
+            # replace existing donation from same form
+            del self.cart[item.item_id]
+        self.cart[item.item_id] = item
+        
+        alsoProvides(self.cart, IDonationCart)
+        notify(DonationCreatedEvent(self.cart))
+        
+        try:
+            sessions.set_came_from_url(pfg)
+        except:
+            pass
+        return item
