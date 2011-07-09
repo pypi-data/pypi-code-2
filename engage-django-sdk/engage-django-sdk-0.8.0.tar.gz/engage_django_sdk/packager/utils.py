@@ -1,0 +1,223 @@
+"""Miscellaneous utility functions"""
+
+import os
+import os.path
+import sys
+import json
+import re
+import subprocess
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
+
+from parse_requirements import parse
+
+def app_module_name_to_dir(app_directory_path, app_module_name, check_for_init_pys=True):
+    """The application module could be a submodule, so we may need to split each level"""
+    dirs = app_module_name.split(".")
+    dirpath = app_directory_path
+    module_name = None
+    for dirname in dirs:
+        if module_name:
+            module_name = module_name + "." + dirname
+        else:
+            module_name = dirname
+        dirpath = os.path.join(dirpath, dirname)
+        init_file = os.path.join(dirpath, "__init__.py")
+        if check_for_init_pys and not os.path.exists(init_file):
+            raise ValidationError("Missing __init__.py file for module %s" % module_name)
+    return dirpath
+
+
+def write_json(json_obj, filename):
+    with open(filename, 'wb') as f:
+        json.dump(json_obj, f)
+
+
+def find_files(directory, filename_re_pattern, operation_function):
+    """Find all the files recursively under directory whose names contain the specified pattern
+       and run the operation_function on the fileame.
+    """
+    regexp = re.compile(filename_re_pattern)
+    directory = os.path.abspath(os.path.expanduser(directory))
+    for root, dirs, files in os.walk(directory):
+        for filename in files:
+            if regexp.search(filename):
+                operation_function(os.path.join(root, filename))
+
+
+def get_deployed_settings_module(django_settings_module):    
+    mod_comps = django_settings_module.split('.')
+    if len(mod_comps)==1:
+        return "deployed_settings"
+    else:
+        return '.'.join(mod_comps[0:-1]) + ".deployed_settings"
+
+
+def import_module(qualified_module_name):
+    """Import the specified module and return the contents of that module.
+    For example if we have a module foo.bar containing variables x and y,
+    we can do the following:
+      m = import_module("foo.bar")
+      print m.x, m.y
+    """
+    m = __import__(qualified_module_name)
+    mod_comps = (qualified_module_name.split('.'))[1:]
+    for comp in mod_comps:
+        m = getattr(m, comp)
+    return m
+    
+
+# Copied from engage.utils.process
+# TODO: need to share code directly
+def run_and_log_program(program_and_args, env_mapping, logger, cwd=None,
+                        input=None, hide_input=False, allow_broken_pipe=False):
+    """Run the specified program as a subprocess and log its output.
+    program_and_args should be a list of entries where the first is the
+    executable path, and the rest are the arguments.
+    """
+    logger.debug(' '.join(program_and_args))
+    if cwd != None:
+        logger.debug("Subprocess working directory is %s" % cwd)
+    if env_mapping == None:
+        logger.debug("Subprocess inheriting parent process's environment")
+    elif len(env_mapping)>0:
+        logger.debug("Subprocess environment is %s" % env_mapping.__str__())
+    else:
+        logger.debug("Subprocess passed empty environment")
+    subproc = subprocess.Popen(program_and_args,
+                               env=env_mapping, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, cwd=cwd)
+    logger.debug("Started program %s, pid is %d" % (program_and_args[0],
+                                                   subproc.pid))
+    if input!=None:
+        if not hide_input:
+            logger.debug("Input is " + input)
+        try:
+            (output, dummy) = subproc.communicate(input)
+            for line in output.split("\n"):
+                logger.debug("[%d] %s" % (subproc.pid, line.rstrip()))
+        except OSError:
+            if not allow_broken_pipe:
+                raise
+            else:
+                logger.warn("Subprocess %d closed stdin before write of input data complete" %
+                            subproc.pid)
+                for line in subproc.stdout:
+                    logger.debug("[%d] %s" % (subproc.pid, line))
+    else:
+        subproc.stdin.close()
+        for line in subproc.stdout:
+            logger.debug("[%d] %s" % (subproc.pid, line))
+    subproc.wait()
+    logger.debug("[%d] %s exited with return code %d" % (subproc.pid,
+                                                        program_and_args[0],
+                                                        subproc.returncode))
+    return subproc.returncode
+
+class SubprocBadRc(Exception):
+    def __init__(self, msg, rc):
+        super(SubprocBadRc, self).__init__(msg)
+        self.rc = rc
+
+def check_run_and_log_program(program_and_args, env_mapping, logger, cwd=None,
+                              input=None, hide_input=False, allow_broken_pipe=False):
+    """Version of run_and_log_program that checks for return code and throws an
+    exception if not zero.
+    """
+    rc = run_and_log_program(program_and_args, env_mapping, logger, cwd,
+                             input, hide_input, allow_broken_pipe)
+    if rc!=0:
+        raise SubprocBadRc("Call to %s failed with return code %d, full command was '%s'" %
+                           (program_and_args[0], rc, ' '.join(program_and_args)),
+                           rc)
+        
+
+def create_virtualenv(desired_python_dir):
+    logger.info(">> Creating Python virtualenv for validation")
+    def find_exe_in_paths(paths, exe):
+        tried = []
+        for p in paths:
+            e = os.path.join(p, exe)
+            if os.path.exists(e):
+                return e
+            tried.append(e)
+        raise Exception("Unable to find %s, tried %s" % (exe, tried))
+    paths = []
+    if os.uname()[0]=="Darwin" and sys.executable.endswith("Resources/Python.app/Contents/MacOS/Python"):
+        # on MacOS, sys.executable could lie to us -- if we start a python like .....2.7/bin/python,
+        # it will tell us .....2.7/Resources/Python.app/Contents/MacOS/Python. This is problematic,
+        # because the other executable scripts (e.g. virtualenv) will be installed with the real python
+        # not the one that sys.executable claims is the real python. To fix this, we add the real python
+        # to the head of our search list.
+        real_python_dir = os.path.abspath(os.path.join(sys.executable, "../../../../../bin"))
+        paths.append(real_python_dir)
+    paths.append(os.path.dirname(sys.executable))
+    env_path = os.getenv("PATH")
+    if env_path:
+        for path in env_path.split(":"):
+            paths.append(os.path.abspath(os.path.expanduser(path)))
+    paths.append(os.path.expanduser("~/bin"))
+    python_exe = find_exe_in_paths(paths, "python")
+    virtualenv_exe = find_exe_in_paths(paths, "virtualenv")
+    cmd = [virtualenv_exe, "--python=%s" % python_exe, "--no-site-packages",
+           os.path.abspath(os.path.expanduser(desired_python_dir))]
+    try:
+        check_run_and_log_program(cmd, None, logger)
+    except Exception, e:
+        logger.exception("Problem in creating virtualenv. Command was '%s', error was %s" % (' '.join(cmd), str(e)))
+        raise Exception("Problem in creating virtualenv. Command was '%s', error was %s" % (' '.join(cmd), str(e)))
+
+packages_to_files = {
+    "Django": "Django-1.2.5.tar.gz",
+    "South": "South-0.7.3.tar.gz",  
+}
+
+def install_requirements(python_virtualenv_dir, requirements_file,
+                         package_cache_dir=None):
+    pip = os.path.abspath(os.path.join(os.path.expanduser(python_virtualenv_dir), "bin/pip"))
+    if not os.path.exists(pip):
+        raise Exception("Could not find pip executable")
+    req_file_path = os.path.abspath(os.path.expanduser(requirements_file))
+    if package_cache_dir:
+        # If the package cache is present, we read through the requirements file to see
+        # if we have any matches. If matches are found, we install them directly. We'll
+        # still run pip on the requirements file at the end to catch anything that is missing
+        # or the wrong version.
+        # TODO: Should parse the version requirements as well and see if our local packages
+        # match them.
+        package_cache_dir = os.path.abspath(os.path.expanduser(package_cache_dir))
+        logger.debug("Checking for packages in directory %s" % package_cache_dir)
+        packages = parse(req_file_path)
+        for package in packages:
+            if packages_to_files.has_key(package):
+                pkg_file = os.path.join(package_cache_dir, packages_to_files[package])
+                if os.path.exists(pkg_file):
+                    cmd = [pip, "install", pkg_file]
+                    try:
+                        check_run_and_log_program(cmd, None, logger)
+                    except Exception, e:
+                        logger.exception("Problem in running pip on package %s. Command was '%s', error was %s" % (pkg_file, ' '.join(cmd), str(e)))
+                        raise Exception("Problem in running pip on package %s. Command was '%s', error was %s" % (pkg_file, ' '.join(cmd), str(e)))
+                        
+    # now, run pip on the requirements file.  
+    cmd = [pip, "install", "-r", req_file_path]
+    try:
+        check_run_and_log_program(cmd, None, logger)
+    except Exception, e:
+        logger.exception("Problem in running pip on requirements file. Command was '%s', error was %s" % (' '.join(cmd), str(e)))
+        raise Exception("Problem in running pip on requirements file. Command was '%s', error was %s" % (' '.join(cmd), str(e)))
+
+_platform_requirements = """
+# engage platform requirements
+Django==1.2.5
+South==0.7.3
+"""
+
+def write_platform_requirements_file(parent_dir):
+    requirements_file = os.path.abspath(os.path.join(os.path.expanduser(parent_dir), "engage_requirements.txt"))
+    with open(requirements_file, "w") as f:
+        f.write(_platform_requirements)
+    return requirements_file
