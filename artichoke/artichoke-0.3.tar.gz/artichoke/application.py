@@ -1,0 +1,77 @@
+from webob import Request, Response
+from webob.exc import HTTPFound
+from authenticator import CookieAuthenticator
+from paste.registry import RegistryManager
+from mail_traceback import send_traceback, format_traceback
+import traceback, mimetypes, os
+from controller import request as a_request, response as a_response
+
+class ArtichokeHelpers(object):
+    pass
+
+class ArtichokeCore(object):
+    def __init__(self, root, templates_path, config={}):
+        self.root = root(self, templates_path, config.get('helpers', ArtichokeHelpers()))
+        self.statics = config.get('statics', 'public')
+        self.autoreload_templates = config.get('autoreload', False)
+
+        requested_authenticator = config.get('authenticator')
+        if not requested_authenticator:
+            self.authenticator = CookieAuthenticator()
+        else:
+            self.authenticator = requested_authenticator()
+
+        self.mail_errors_to = config.get('mail_errors_to')
+        self.mail_errors_from = config.get('mail_errors_from', 'artichoke@localhost')
+        self.traceback = config.get('traceback', True)
+        self.force_request_encoding = config.get('force_request_encoding', 'utf-8')
+
+    def __call__(self, environ, start_response):
+        request = Request(environ=environ)
+        environ['paste.registry'].register(a_request, request)
+
+        response = Response(body="Artichoke Default Page", content_type='text/html', charset='utf-8')
+        environ['paste.registry'].register(a_response, response)
+
+        if self.force_request_encoding:
+            request.charset = self.force_request_encoding
+
+        static_path = self.statics + request.path_info
+        if os.path.exists(static_path) and os.path.isfile(static_path):
+            response.body = open(static_path).read()
+            response.status = 200
+            response.content_type = mimetypes.guess_type(static_path)[0]
+        else:
+            try:
+                self.authenticator.authenticate(request)
+                self.root._dispatch(request)
+                self.authenticator.inject_cookie(response)
+            except HTTPFound, e:
+                response = e
+                self.authenticator.inject_cookie(response)
+            except Exception, e:
+                if self.mail_errors_to:
+                    send_traceback(self.mail_errors_from, self.mail_errors_to)
+
+                if self.traceback:
+                    format_error_body = traceback.format_exc()
+                    try:
+                        format_error_body = format_traceback()
+                        format_content_type = 'text/html'
+                    except:
+                        format_content_type = 'text/plain'
+                    response.body = format_error_body
+                    response.status = 500
+                    response.content_type = format_content_type
+                else:
+                    response.body = "Internal Server Error"
+                    response.status = 500
+        return response(environ, start_response)
+
+class Application(object):
+    def __init__(self, root, templates_path, config={}):
+        self.inner_app = ArtichokeCore(root, templates_path, config)
+        self.registry_manager = RegistryManager(self.inner_app)
+
+    def __call__(self, environ, start_response):
+        return self.registry_manager(environ, start_response)
