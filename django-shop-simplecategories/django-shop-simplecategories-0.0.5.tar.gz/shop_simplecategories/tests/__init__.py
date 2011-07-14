@@ -1,0 +1,3 @@
+from categories import CategoriesTestCase
+from views import CategoryDetailViewTestCase
+from templatetags import RootCategoryTagTestCase
