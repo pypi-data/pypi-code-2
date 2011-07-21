@@ -1,0 +1,31 @@
+# Copyright (c) 2008 by Yaco Sistemas S.L.
+# Contact info: Lorenzo Gil Sanchez <lgs@yaco.es>
+#
+# This file is part of searchform
+#
+# searchform is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# searchform is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with searchform.  If not, see <http://www.gnu.org/licenses/>.
+
+import os.path
+
+from django.conf.urls.defaults import patterns
+
+
+def get_media_dir():
+    return os.path.join(os.path.dirname(__file__), 'media')
+
+urlpatterns = patterns('',
+                       (r'^(.*)$', 'django.views.static.serve',
+                        {'document_root': get_media_dir(),
+                         'show_indexes': True}),
+)
