@@ -1,0 +1,140 @@
+'''
+@author: darvin
+This module must be imported from django enviroment
+'''
+
+
+from piston.handler import AnonymousBaseHandler, BaseHandler
+from piston.utils import rc
+from piston.utils import validate
+import json
+from django.db.models.fields.related import ForeignKey, ManyToManyField
+
+from forms import create_form_type
+import qtdjango
+from django.conf import settings
+import inspect
+
+
+class InfoHandler(AnonymousBaseHandler):
+    allowed_methods = ('GET',)
+
+    models = []
+    server_package = None
+
+    @staticmethod
+    def create_model_info(model):
+        fields = {}
+        for field in model._meta.fields:
+            try:
+                f = {}
+                f["type"]=field.__class__.__name__
+                fields[field.name] = f
+            except AttributeError:
+                pass
+
+        info = {"name":model.__name__,
+                "fields":fields,
+                }
+
+        try:
+            info["dump_order"]=model.dump_order
+        except AttributeError:
+            pass
+        return info
+
+    @classmethod
+    def set_models(cls, models):
+        for model in models:
+            cls.models.append(cls.create_model_info(model))
+
+    def read(self, request):
+        #FIXME!
+        project_module = __import__(getattr(settings, "ROOT_URLCONF").split(".")[0])
+        project_version = project_module.__version__
+        d = {
+            "qtdjango_version":qtdjango.__version__,
+            "server_version":project_version,
+            "qtdjango_apps_setting":getattr(settings, "QTDJANGO_APPS" ),
+            "models":self.models
+        }
+        return d
+
+
+
+class MetaHandler(BaseHandler):
+    exclude = ()
+#    fields = ("machinemark",)
+    allowed_methods = ('GET','POST')
+    
+    def has_model(self):
+        return hasattr(self, 'model') or hasattr(self, 'queryset')
+
+    def create(self, request, *args, **kwargs):
+        if not self.has_model():
+            return rc.NOT_IMPLEMENTED
+
+        # get the actual data that wants to be created from the api request
+        attrs = self.flatten_dict(request.POST)
+
+        for field in self.model._meta.fields:
+            # this is a ForeignKey (as far as I can tell... _meta isn't documented)
+            # so we need to convert it to it's pk equivilent... there's most likely
+            # a better way of doing this than hardcoding stuff...
+            if field.name in attrs:
+                if isinstance(field, ForeignKey):
+                    attrs[field.name] =  field.rel.to.objects.get(\
+                        **{field.rel.field_name: attrs[field.name]})
+                elif isinstance(field, ManyToManyField):
+
+                    print
+        attrs_many_to_many = {}
+        for field in self.model._meta.many_to_many:
+            attrs_many_to_many[field.name] =  field.rel.to.objects.filter(\
+                        **{"pk__in": json.loads(attrs[field.name])})
+            del attrs[field.name]
+
+
+        try:
+            inst = self.model.objects.get(**attrs)
+            return rc.DUPLICATE_ENTRY
+        except self.model.DoesNotExist:
+            inst = self.model()
+            inst = self.model(**attrs)
+            inst.save()
+            for field in attrs_many_to_many:
+                print getattr(inst,field)
+                print attrs_many_to_many[field]
+                setattr(inst,field, attrs_many_to_many[field])
+
+            if attrs_many_to_many:
+                inst.save()
+            return inst
+        except self.model.MultipleObjectsReturned:
+            return rc.DUPLICATE_ENTRY
+
+
+def create_handler_type(model):
+    """Builds handler class from model
+    @param model: Model class"""
+    f = []
+    for field in model._meta.fields:
+        f.append(field.name)
+
+    for methodname in dir(model):
+        try:
+            if getattr(model, methodname).method_as_field:
+                f.append(methodname)
+        except AttributeError:
+            pass
+
+    for field in model._meta.many_to_many:
+        f.append(field.name)
+    handler_type = type(model.__name__+"Handler", (MetaHandler,),\
+                        {"model":model, "fields":f})
+    valid_decor = validate(create_form_type(model))
+    handler_type.create = valid_decor(handler_type.create)
+
+
+
+    return handler_type
