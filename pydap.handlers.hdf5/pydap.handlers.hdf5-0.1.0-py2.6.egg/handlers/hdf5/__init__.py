@@ -1,0 +1,74 @@
+import os
+import re
+import time
+from stat import ST_MTIME
+from email.utils import formatdate
+
+from arrayterator import Arrayterator
+
+from pydap.model import *
+from pydap.handlers.lib import BaseHandler
+from pydap.exceptions import OpenFileError
+
+import h5py
+
+
+class Handler(BaseHandler):
+
+    extensions = re.compile(r"^.*\.(h5|hdf5)$", re.IGNORECASE)
+
+    def __init__(self, filepath):
+        self.filepath = filepath
+
+    def parse_constraints(self, environ):
+        buf_size = int(environ.get('pydap.handlers.netcdf.buf_size', 10000))
+
+        try:
+            fp = h5py.File(self.filepath)
+        except:
+            message = 'Unable to open file %s.' % self.filepath
+            raise OpenFileError(message)
+
+        last_modified = formatdate( time.mktime( time.localtime( os.stat(self.filepath)[ST_MTIME] ) ) )
+        environ['pydap.headers'].append( ('Last-modified', last_modified) )
+
+        dataset = DatasetType(name=os.path.split(self.filepath)[1],
+                attributes={'NC_GLOBAL': dict(fp.attrs)})
+
+        fields, queries = environ['pydap.ce']
+        fields = fields or [[(name, ())] for name in fp.keys()]
+        for var in fields:
+            target = dataset
+            source = fp
+            while var:
+                name, slice_ = var.pop(0)
+                if name in source and isinstance(source[name], h5py.Dataset):
+                    target[name] = get_var(name, source, slice_, buf_size)
+                elif var and name in source and isinstance(source[name], h5py.Group):
+                    attrs = dict(source[name])
+                    target.setdefault(name, StructureType(name=name, attributes=attrs))
+                    target = target[name]
+                    source = source[name]
+
+        dataset._set_id()
+        dataset.close = fp.close
+        return dataset
+
+
+def get_var(name, source, slice_, buf_size=10000):
+    var = source[name]
+    data = Arrayterator(var, buf_size)[slice_]
+    typecode = var.dtype.char
+    attrs = dict(var.attrs)
+    attrs['_FillValue'] = var.fillvalue
+
+    return BaseType(name=name, data=data, shape=data.shape,
+            type=typecode, attributes=attrs)
+
+
+if __name__ == '__main__':
+    import sys
+    from paste.httpserver import serve
+
+    application = Handler(sys.argv[1])
+    serve(application, port=8001)
