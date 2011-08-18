@@ -1,0 +1,2 @@
+class GPException(Exception):
+    pass
