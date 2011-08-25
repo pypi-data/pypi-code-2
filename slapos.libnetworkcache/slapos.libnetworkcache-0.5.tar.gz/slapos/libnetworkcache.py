@@ -1,0 +1,219 @@
+##############################################################################
+#
+# Copyright (c) 2010 ViFiB SARL and Contributors.
+# All Rights Reserved.
+#
+# This software is subject to the provisions of the Zope Public License,
+# Version 2.1 (ZPL).  A copy of the ZPL should accompany this distribution.
+# THIS SOFTWARE IS PROVIDED "AS IS" AND ANY AND ALL EXPRESS OR IMPLIED
+# WARRANTIES ARE DISCLAIMED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF TITLE, MERCHANTABILITY, AGAINST INFRINGEMENT, AND FITNESS
+# FOR A PARTICULAR PURPOSE.
+#
+##############################################################################
+
+
+import base64
+import hashlib
+import httplib
+import json
+import os
+import tempfile
+import urllib2
+import urlparse
+import M2Crypto
+import socket
+
+
+class NetworkcacheClient(object):
+  '''
+    NetworkcacheClient is a wrapper for httplib.
+    It must implement all the required methods to use:
+     - SHADIR
+     - SHACACHE
+  '''
+
+  def parseUrl(self, url):
+    return_dict = {}
+    parsed_url = urlparse.urlparse(url)
+    return_dict['header_dict'] = {'Content-Type': 'application/json'}
+    user = parsed_url.username
+    passwd = parsed_url.password
+    if user is not None:
+      authentication_string = '%s:%s' % (user, passwd)
+      base64string = base64.encodestring(authentication_string).strip()
+      return_dict['header_dict']['Authorization'] = 'Basic %s' %\
+        base64string
+
+    return_dict['path'] = parsed_url.path
+    return_dict['host'] = parsed_url.hostname
+    return_dict['scheme'] = parsed_url.scheme
+    return_dict['port'] = parsed_url.port or \
+                           socket.getservbyname(parsed_url.scheme)
+
+    return return_dict
+
+  def __init__(self, shacache, shadir,
+               signature_private_key_file=None,
+               signature_certificate_list=None):
+    ''' Set the initial values. '''
+    # ShaCache Properties
+    for k, v in self.parseUrl(shacache).iteritems():
+      setattr(self, 'shacache_%s' % k, v)
+    self.shacache_url = shacache
+    self.shadir_url = shadir
+
+    # ShaDir Properties
+    for k, v in self.parseUrl(shadir).iteritems():
+      setattr(self, 'shadir_%s' % k, v)
+
+    self.signature_private_key_file = signature_private_key_file
+    self.signature_certificate_list = signature_certificate_list
+
+  def upload(self, file_descriptor, key=None, urlmd5=None, file_name=None,
+    valid_until=None, architecture=None):
+    ''' Upload the file to the server.
+    If urlmd5 is None it must only upload to SHACACHE.
+    Otherwise, it must create a new entry on SHADIR.
+    '''
+    sha512sum = hashlib.sha512()
+    # do not trust, go to beginning of opened file
+    file_descriptor.seek(0)
+    while True:
+      d = file_descriptor.read(sha512sum.block_size)
+      if not d:
+        break
+      sha512sum.update(d)
+    sha512sum = sha512sum.hexdigest()
+
+    file_descriptor.seek(0)
+    shacache_connection = httplib.HTTPConnection(self.shacache_host,
+      self.shacache_port)
+    try:
+      shacache_connection.request('POST', self.shacache_path, file_descriptor,
+                                                 self.shacache_header_dict)
+      result = shacache_connection.getresponse()
+      data = result.read()
+    finally:
+      shacache_connection.close()
+
+    if result.status != 201 or data != sha512sum:
+      raise UploadError('Failed to upload the file to SHACACHE Server.' \
+                        'URL: %s. Response code: %s. Response data: %s' % \
+                                   (self.shacache_host, result.status, data))
+
+    if key is not None:
+      if file_name is None or urlmd5 is None:
+        raise ValueError('In case if key is given file_name and urlmd5 '
+          'are required.')
+      kw = dict()
+      kw['file'] = file_name
+      kw['urlmd5'] = urlmd5
+      kw['sha512'] = sha512sum
+
+      if valid_until is not None:
+        kw['valid-until'] = valid_until
+      if architecture is not None:
+        kw['architecture'] = architecture
+
+      signature = self._getSignatureString()
+      data = [kw, signature]
+
+      shadir_connection = httplib.HTTPConnection(self.shadir_host,
+        self.shadir_port)
+      try:
+        shadir_connection.request('PUT', '/'.join([self.shadir_path, key]),
+          json.dumps(data), self.shadir_header_dict)
+        result = shadir_connection.getresponse()
+        data = result.read()
+      finally:
+        shadir_connection.close()
+
+      if result.status != 201:
+        raise UploadError('Failed to upload data to SHADIR Server.' \
+                          'URL: %s. Response code: %s. Response data: %s' % \
+                                     (self.shacache_host, result.status, data))
+    return True
+
+  def download(self, sha512sum):
+    ''' Download the file.
+    It uses http GET request method.
+    '''
+    sha_cache_url = os.path.join(self.shacache_url, sha512sum)
+    file_descriptor = tempfile.NamedTemporaryFile()
+    request = urllib2.Request(url=sha_cache_url, data=None,
+      headers=self.shadir_header_dict)
+    return urllib2.urlopen(request)
+
+  def select(self, key):
+    ''' Download a file from shacache by selecting the entry in shadir
+    Raise DirectoryNotFound if multiple files are found.
+    '''
+    url = os.path.join(self.shadir_url, key)
+    file_descriptor = tempfile.NamedTemporaryFile()
+    request = urllib2.Request(url=url, data=None,
+      headers=self.shadir_header_dict)
+    data = urllib2.urlopen(request).read()
+    # Filtering...
+    data_list = json.loads(data)
+
+    if self.signature_certificate_list is not None:
+      data_list = filter(lambda x: self._verifySignatureInCertificateList(
+        x[1]), data_list)
+      if not data_list:
+        raise DirectoryNotFound('Could not find a trustable entry.')
+
+    if len(data_list) > 1:
+      raise DirectoryNotFound('Too many entries for a given key %r. ' \
+               'Entries: %s.' % (key, str(data_list)))
+
+    information_dict, signature = data_list[0]
+    sha512 = information_dict.get('sha512')
+    return self.download(sha512)
+
+  def _getSignatureString(self):
+    """
+      Return the signature based on certification file.
+    """
+    if self.signature_private_key_file is None:
+      return ''
+
+    SignEVP = M2Crypto.EVP.load_key(self.signature_private_key_file)
+    SignEVP.sign_init()
+    SignEVP.sign_update('')
+    StringSignature = SignEVP.sign_final()
+    return StringSignature.encode('base64')
+
+  def _verifySignatureInCertificateList(self, signature_string):
+    """
+      Returns true if it can find any valid certificate or false if it does not
+      find any.
+    """
+    if self.signature_certificate_list is not None:
+      for certificate in self.signature_certificate_list:
+        if self._verifySignatureCertificate(signature_string, certificate):
+          return True
+    return False
+
+  def _verifySignatureCertificate(self, signature_string, certificate):
+    """ verify if the signature is valid for a given certificate. """
+    certificate_file = tempfile.NamedTemporaryFile()
+    certificate_file.write(certificate)
+    certificate_file.flush()
+    certificate_file.seek(0)
+    try:
+      PubKey = M2Crypto.X509.load_cert(certificate_file.name)
+      VerifyEVP = M2Crypto.EVP.PKey()
+      VerifyEVP.assign_rsa(PubKey.get_pubkey().get_rsa())
+      VerifyEVP.verify_init()
+      VerifyEVP.verify_update('')
+      return VerifyEVP.verify_final(signature_string.decode('base64'))
+    finally:
+      certificate_file.close()
+
+class DirectoryNotFound(Exception):
+  pass
+
+
+class UploadError(Exception):
+  pass
