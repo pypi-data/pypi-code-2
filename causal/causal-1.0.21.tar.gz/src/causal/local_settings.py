@@ -1,0 +1,68 @@
+"""Example local settings, you might enable settings for debug here, and you
+definitely want to put your DB settings here::
+
+    cp local_settings.py.example local_settings.py
+"""
+
+# Enabling DEBUG will also enable TEMPLATE_DEBUG
+DEBUG = True
+# Enabling these admin features will automatically enable
+# the corresponding apps
+ENABLE_ADMIN = True
+ENABLE_ADMIN_DOCS = True
+SERVE_STATIC = True
+USE_GOOGLE_CDN = False
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3', # Add 'postgresql_psycopg2', 'postgresql', 'mysql', 'sqlite3' or 'oracle'.
+        'NAME': '/home/wesm/causal.db',                      # Or path to database file if using sqlite3.
+        'USER': '',                      # Not used with sqlite3.
+        'PASSWORD': '',                  # Not used with sqlite3.
+        'HOST': '',                      # Set to empty string for localhost. Not used with sqlite3.
+        'PORT': '',                      # Set to empty string for default. Not used with sqlite3.
+    }
+}
+
+# By default if you enable caching, it will use memcached on 127.0.0.1:11211
+ENABLE_CACHING = True
+
+ENABLE_REGISTRATION = True
+
+# Same rules apply as in django's INSTALLED_APPS
+# adding any here will also add them to INSTALLED_APPS
+INSTALLED_SERVICES = (
+    'causal.delicious',
+    'causal.googlereader',
+    'causal.facebook',
+    'causal.flickr',
+    'causal.foursquare',
+    'causal.github',
+    'causal.lastfm',
+    'causal.twitter',
+)
+
+#INSTALLED_APPS_EXTEND = (
+#    'devserver',
+#)
+
+# *Don't* use the below example, generate your own random string of chars
+SECRET_KEY = '`|9IK8w@VfU&([H{vaKpTRsmFq]zw7&pTIK4h#A$`@*>(&xSn<N(dg?=sxD|;*D'
+
+# Logging
+import logging
+from logging.handlers import RotatingFileHandler
+LOG_FILENAME = 'causal.log'
+LOG_SIZE = 2097152 # 2 MB
+LOG_BACKUP_COUNT = 5 # Keep the main .log file, plus .log.[1-5]
+
+GLOBAL_LOG_LEVEL = logging.ERROR
+handler = RotatingFileHandler(LOG_FILENAME, maxBytes=LOG_SIZE, backupCount=LOG_BACKUP_COUNT)
+GLOBAL_LOG_HANDLERS = [
+    {
+        'handler': handler,
+        'level': GLOBAL_LOG_LEVEL,
+        'format': "%(asctime)s %(source)s: %(message)s"
+        },
+]
+
