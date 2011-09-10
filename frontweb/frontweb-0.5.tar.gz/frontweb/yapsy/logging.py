@@ -1,0 +1,2 @@
+def debug(cadena):
+    pass
